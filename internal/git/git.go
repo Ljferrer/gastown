@@ -1172,10 +1172,16 @@ func (g *Git) BitbucketPRMerge(workspace, repoSlug string, prID int, strategy st
 	return sha, nil
 }
 
-// ListRemoteRefs returns remote ref names matching a prefix using ls-remote.
+// RemoteRef is a ref observed through ls-remote.
+type RemoteRef struct {
+	Hash string
+	Name string
+}
+
+// ListRemoteRefsWithHashes returns remote refs matching a prefix using ls-remote.
 // The prefix filters refs (e.g., "refs/heads/polecat/" for all polecat branches).
 // Returns full ref names like "refs/heads/polecat/furiosa-abc123".
-func (g *Git) ListRemoteRefs(remote, prefix string) ([]string, error) {
+func (g *Git) ListRemoteRefsWithHashes(remote, prefix string) ([]RemoteRef, error) {
 	out, err := g.run("ls-remote", "--refs", remote, prefix+"*")
 	if err != nil {
 		return nil, err
@@ -1183,7 +1189,7 @@ func (g *Git) ListRemoteRefs(remote, prefix string) ([]string, error) {
 	if out == "" {
 		return nil, nil
 	}
-	var refs []string
+	var refs []RemoteRef
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -1192,8 +1198,21 @@ func (g *Git) ListRemoteRefs(remote, prefix string) ([]string, error) {
 		// ls-remote output format: <sha>\t<refname>
 		parts := strings.Fields(line)
 		if len(parts) >= 2 {
-			refs = append(refs, parts[1])
+			refs = append(refs, RemoteRef{Hash: parts[0], Name: parts[1]})
 		}
+	}
+	return refs, nil
+}
+
+// ListRemoteRefs returns remote ref names matching a prefix using ls-remote.
+func (g *Git) ListRemoteRefs(remote, prefix string) ([]string, error) {
+	refsWithHashes, err := g.ListRemoteRefsWithHashes(remote, prefix)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]string, 0, len(refsWithHashes))
+	for _, ref := range refsWithHashes {
+		refs = append(refs, ref.Name)
 	}
 	return refs, nil
 }
@@ -1215,13 +1234,26 @@ func (g *Git) RemoteHasRefs(remote string) (bool, error) {
 // method queries the push URL so cleanup can find branches that were pushed.
 // Falls back to ListRemoteRefs if no custom push URL is configured.
 func (g *Git) ListPushRemoteRefs(remote, prefix string) ([]string, error) {
+	refsWithHashes, err := g.ListPushRemoteRefsWithHashes(remote, prefix)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]string, 0, len(refsWithHashes))
+	for _, ref := range refsWithHashes {
+		refs = append(refs, ref.Name)
+	}
+	return refs, nil
+}
+
+// ListPushRemoteRefsWithHashes is ListPushRemoteRefs with commit hashes.
+func (g *Git) ListPushRemoteRefsWithHashes(remote, prefix string) ([]RemoteRef, error) {
 	fetchURL, fetchErr := g.RemoteURL(remote)
 	pushURL, pushErr := g.GetPushURL(remote)
 	if fetchErr != nil || pushErr != nil || pushURL == fetchURL {
-		return g.ListRemoteRefs(remote, prefix)
+		return g.ListRemoteRefsWithHashes(remote, prefix)
 	}
 	// Query the push URL directly
-	return g.ListRemoteRefs(pushURL, prefix)
+	return g.ListRemoteRefsWithHashes(pushURL, prefix)
 }
 
 // Rebase rebases the current branch onto the given ref.

@@ -1680,16 +1680,20 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 		fmt.Println("Pruning remote polecat branches...")
 
 		defaultBranch := repoGit.RemoteDefaultBranch()
-		remoteRefs, lsErr := repoGit.ListPushRemoteRefs("origin", "refs/heads/polecat/")
+		remoteRefs, lsErr := repoGit.ListPushRemoteRefsWithHashes("origin", "refs/heads/polecat/")
 		if lsErr != nil {
 			return fmt.Errorf("listing remote refs: %w", lsErr)
 		}
 
 		remotePruned := 0
 		for _, ref := range remoteRefs {
-			branch := strings.TrimPrefix(ref, "refs/heads/")
-			// Check if merged to main
-			merged, mergeErr := repoGit.IsAncestor(branch, "origin/"+defaultBranch)
+			if !strings.HasPrefix(ref.Name, "refs/heads/") {
+				continue
+			}
+			branch := strings.TrimPrefix(ref.Name, "refs/heads/")
+			// Use the listed remote tip, not the short branch name, so remote-only
+			// branches can be classified without a local branch.
+			merged, mergeErr := repoGit.IsAncestor(ref.Hash, "origin/"+defaultBranch)
 			if mergeErr != nil {
 				continue
 			}

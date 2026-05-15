@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,23 +190,27 @@ func polecatBeadIDForRig(r *rig.Rig, rigName, polecatName string) string {
 
 // displaySafetyCheckBlocked prints blocked polecats and guidance.
 func displaySafetyCheckBlocked(blocked []*SafetyCheckResult) {
-	fmt.Fprintf(os.Stderr, "%s Cannot nuke the following polecats:\n\n", style.Error.Render("Error:"))
+	displaySafetyCheckBlockedTo(os.Stderr, blocked)
+}
+
+func displaySafetyCheckBlockedTo(w io.Writer, blocked []*SafetyCheckResult) {
+	fmt.Fprintf(w, "%s Cannot nuke the following polecats:\n\n", style.Error.Render("Error:"))
 	var polecatList []string
 	for _, b := range blocked {
-		fmt.Fprintf(os.Stderr, "  %s:\n", style.Bold.Render(b.Polecat))
+		fmt.Fprintf(w, "  %s:\n", style.Bold.Render(b.Polecat))
 		for _, r := range b.Reasons {
-			fmt.Fprintf(os.Stderr, "    - %s\n", r)
+			fmt.Fprintf(w, "    - %s\n", r)
 		}
 		polecatList = append(polecatList, b.Polecat)
 	}
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Safety checks failed. Resolve issues before nuking, or use --force.")
-	fmt.Fprintln(os.Stderr, "Options:")
-	fmt.Fprintln(os.Stderr, "  1. Complete work: gt done (from polecat session)")
-	fmt.Fprintln(os.Stderr, "  2. Push changes: git push (from polecat worktree)")
-	fmt.Fprintln(os.Stderr, "  3. Escalate: gt mail send mayor/ -s \"RECOVERY_NEEDED\" -m \"...\"")
-	fmt.Fprintf(os.Stderr, "  4. Force nuke (LOSES WORK): gt polecat nuke --force %s\n", strings.Join(polecatList, " "))
-	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Safety checks failed. Resolve issues before nuking, or use --force.")
+	fmt.Fprintln(w, "Options:")
+	fmt.Fprintln(w, "  1. Complete work: gt done (from polecat session)")
+	fmt.Fprintln(w, "  2. Push changes: git push (from polecat worktree)")
+	fmt.Fprintln(w, "  3. Escalate: gt mail send mayor/ -s \"RECOVERY_NEEDED\" -m \"...\"")
+	fmt.Fprintf(w, "  4. Force nuke (LOSES WORK): gt polecat nuke --force %s\n", strings.Join(polecatList, " "))
+	fmt.Fprintln(w)
 }
 
 func formatSafetyCheckBlockers(blocked []*SafetyCheckResult) string {
@@ -216,9 +221,10 @@ func formatSafetyCheckBlockers(blocked []*SafetyCheckResult) string {
 	return strings.Join(parts, " | ")
 }
 
-// displayDryRunSafetyCheck shows safety check status for dry-run mode.
-func displayDryRunSafetyCheck(target polecatTarget) {
+// displayDryRunSafetyCheck shows safety check status for dry-run mode. It returns true when a normal nuke would refuse.
+func displayDryRunSafetyCheck(target polecatTarget) bool {
 	fmt.Printf("\n  Safety checks:\n")
+	result := checkPolecatSafety(target)
 	polecatInfo, infoErr := target.mgr.Get(target.polecatName)
 	bd := beads.New(target.r.Path)
 	agentBeadID := polecatBeadIDForRig(target.r, target.rigName, target.polecatName)
@@ -288,4 +294,6 @@ func displayDryRunSafetyCheck(target polecatTarget) {
 	} else {
 		fmt.Printf("    - Open MR: %s\n", style.Dim.Render("unknown (no branch info)"))
 	}
+
+	return result.Blocked
 }

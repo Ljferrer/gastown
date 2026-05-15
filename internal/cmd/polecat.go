@@ -1188,20 +1188,6 @@ type issueShower interface {
 	Show(issueID string) (*beads.Issue, error)
 }
 
-func isActiveMRTerminal(bd issueShower, mrID string) bool {
-	if mrID == "" {
-		return true
-	}
-	if bd == nil {
-		return false
-	}
-	mr, err := bd.Show(mrID)
-	if err != nil || mr == nil {
-		return false
-	}
-	return beads.IssueStatus(mr.Status).IsTerminal()
-}
-
 func cleanupStatusBlocker(status polecat.CleanupStatus) string {
 	switch status {
 	case polecat.CleanupClean:
@@ -1224,6 +1210,9 @@ func activeMRBlocker(bd issueShower, mrID string) string {
 	}
 	mr, err := bd.Show(mrID)
 	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return fmt.Sprintf("active_mr=%s status=missing", mrID)
+		}
 		return fmt.Sprintf("active_mr=%s status=lookup_error: %v", mrID, err)
 	}
 	if mr == nil {
@@ -1401,6 +1390,7 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	nuked := 0
 	batchPurge := !polecatNukeDryRun && len(targets) > 1
 	purgeRigs := make(map[string]*rig.Rig)
+	dryRunBlocked := 0
 
 	for _, p := range targets {
 		if polecatNukeDryRun {
@@ -1410,7 +1400,9 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  - Delete branch (if exists)\n")
 			fmt.Printf("  - Reset agent bead: %s\n", polecatBeadIDForRig(p.r, p.rigName, p.polecatName))
 
-			displayDryRunSafetyCheck(p)
+			if displayDryRunSafetyCheck(p) {
+				dryRunBlocked++
+			}
 			fmt.Println()
 			continue
 		}
@@ -1439,7 +1431,11 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 
 	// Report results
 	if polecatNukeDryRun {
-		fmt.Printf("\n%s Would nuke %d polecat(s).\n", style.Info.Render("ℹ"), len(targets))
+		if dryRunBlocked > 0 {
+			fmt.Printf("\n%s Would refuse to nuke %d of %d polecat(s) without --force.\n", style.Warning.Render("⚠"), dryRunBlocked, len(targets))
+		} else {
+			fmt.Printf("\n%s Would nuke %d polecat(s).\n", style.Info.Render("ℹ"), len(targets))
+		}
 		return nil
 	}
 

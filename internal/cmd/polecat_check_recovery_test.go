@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -114,52 +116,6 @@ func TestApplyMQCheck(t *testing.T) {
 	}
 }
 
-func TestIsActiveMRTerminal(t *testing.T) {
-	tests := []struct {
-		name string
-		mrID string
-		bd   issueShower
-		want bool
-	}{
-		{
-			name: "empty active MR is terminal",
-			want: true,
-		},
-		{
-			name: "closed active MR is terminal",
-			mrID: "mr-1",
-			bd:   fakeIssueShower{issue: &beads.Issue{ID: "mr-1", Status: "closed"}},
-			want: true,
-		},
-		{
-			name: "open active MR is not terminal",
-			mrID: "mr-1",
-			bd:   fakeIssueShower{issue: &beads.Issue{ID: "mr-1", Status: "open"}},
-			want: false,
-		},
-		{
-			name: "missing active MR is not terminal",
-			mrID: "mr-1",
-			bd:   fakeIssueShower{issue: nil},
-			want: false,
-		},
-		{
-			name: "lookup error is not terminal",
-			mrID: "mr-1",
-			bd:   fakeIssueShower{err: errors.New("bd exploded")},
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isActiveMRTerminal(tt.bd, tt.mrID); got != tt.want {
-				t.Errorf("isActiveMRTerminal() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestCleanupStatusBlocker(t *testing.T) {
 	tests := []struct {
 		status string
@@ -192,8 +148,9 @@ func TestActiveMRBlocker(t *testing.T) {
 		{name: "empty", want: ""},
 		{name: "closed", mrID: "mr-1", bd: fakeIssueShower{issue: &beads.Issue{ID: "mr-1", Status: "closed"}}, want: ""},
 		{name: "open", mrID: "mr-1", bd: fakeIssueShower{issue: &beads.Issue{ID: "mr-1", Status: "open"}}, want: "active_mr=mr-1 status=open"},
-		{name: "missing", mrID: "mr-1", bd: fakeIssueShower{issue: nil}, want: "active_mr=mr-1 status=missing"},
+		{name: "missing", mrID: "mr-1", bd: fakeIssueShower{err: beads.ErrNotFound}, want: "active_mr=mr-1 status=missing"},
 		{name: "nil reader", mrID: "mr-1", bd: nil, want: "active_mr=mr-1 status=unverified"},
+		{name: "lookup error", mrID: "mr-1", bd: fakeIssueShower{err: errors.New("bd exploded")}, want: "active_mr=mr-1 status=lookup_error: bd exploded"},
 	}
 
 	for _, tt := range tests {
@@ -216,5 +173,25 @@ func TestFormatSafetyCheckBlockers(t *testing.T) {
 	want := "gastown/fury: cleanup_status=unknown; active_mr=hq-wisp-1 status=open | gastown/rust: has work on hook (gt-abc)"
 	if got != want {
 		t.Errorf("formatSafetyCheckBlockers() = %q, want %q", got, want)
+	}
+}
+
+func TestDisplaySafetyCheckBlockedToIncludesPredicates(t *testing.T) {
+	var buf bytes.Buffer
+	displaySafetyCheckBlockedTo(&buf, []*SafetyCheckResult{{
+		Polecat: "gastown/fury",
+		Reasons: []string{"cleanup_status=unknown", "active_mr=hq-wisp-1 status=open"},
+	}})
+	out := buf.String()
+	for _, want := range []string{
+		"Cannot nuke",
+		"gastown/fury",
+		"cleanup_status=unknown",
+		"active_mr=hq-wisp-1 status=open",
+		"Force nuke (LOSES WORK)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("displaySafetyCheckBlockedTo() missing %q in %q", want, out)
+		}
 	}
 }

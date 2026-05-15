@@ -2341,37 +2341,47 @@ func (m *Manager) ClearIssue(name string) error {
 // Errors are logged as warnings but do not block removal.
 func (m *Manager) unassignWorkBeads(name string) {
 	assignee := m.assigneeID(name)
-	// Check all active work statuses that could leave orphaned beads
-	for _, status := range []string{"open", "in_progress", beads.StatusHooked} {
-		issues, err := m.beads.List(beads.ListOptions{
-			Status:   status,
-			Assignee: assignee,
-			Priority: -1,
-		})
-		if err != nil {
-			style.PrintWarning("could not list %s beads for %s: %v", status, name, err)
-			continue
-		}
-		for _, issue := range issues {
-			// Skip agent beads — handled by ResetAgentBeadForReuse
-			if beads.IsAgentBead(issue) {
-				continue
-			}
-			// Skip protected beads (standing orders, role defs, etc.) —
-			// they should retain their status and assignee across polecat lifecycles.
-			if beads.IsProtectedBead(issue) {
-				continue
-			}
-			openStatus := "open"
-			empty := ""
-			if err := m.beads.Update(issue.ID, beads.UpdateOptions{
-				Status:   &openStatus,
-				Assignee: &empty,
-			}); err != nil {
-				style.PrintWarning("could not unassign bead %s from %s: %v", issue.ID, name, err)
-			}
+	issues, err := m.beads.ListByAssignee(assignee)
+	if err != nil {
+		style.PrintWarning("could not list assigned beads for %s: %v", name, err)
+		return
+	}
+
+	for _, issue := range activeWorkBeadsForCleanup(issues) {
+		openStatus := "open"
+		empty := ""
+		if err := m.beads.Update(issue.ID, beads.UpdateOptions{
+			Status:   &openStatus,
+			Assignee: &empty,
+		}); err != nil {
+			style.PrintWarning("could not unassign bead %s from %s: %v", issue.ID, name, err)
 		}
 	}
+}
+
+func activeWorkBeadsForCleanup(issues []*beads.Issue) []*beads.Issue {
+	activeStatuses := map[string]bool{
+		"open":             true,
+		"in_progress":      true,
+		beads.StatusHooked: true,
+	}
+	var work []*beads.Issue
+	for _, issue := range issues {
+		if issue == nil || !activeStatuses[issue.Status] {
+			continue
+		}
+		// Skip agent beads — handled by ResetAgentBeadForReuse.
+		if beads.IsAgentBead(issue) {
+			continue
+		}
+		// Skip protected beads (standing orders, role defs, etc.) — they should
+		// retain status and assignee across polecat lifecycles.
+		if beads.IsProtectedBead(issue) {
+			continue
+		}
+		work = append(work, issue)
+	}
+	return work
 }
 
 // loadFromBeads gets polecat info from hooked work beads + beads assignee field + tmux session state.

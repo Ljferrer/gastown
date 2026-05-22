@@ -637,6 +637,29 @@ func TestAppendRouteIfPrefixAvailable(t *testing.T) {
 	}
 }
 
+func TestAppendRouteRejectsCrossRigPrefixRewrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := WriteRoutes(beadsDir, []Route{{Prefix: "gt-", Path: "gastown/mayor/rig"}}); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	if err := AppendRoute(tmpDir, Route{Prefix: "gt-", Path: "secondrig/mayor/rig"}); err == nil {
+		t.Fatal("AppendRoute succeeded for different-rig prefix collision")
+	}
+	if err := AppendRoute(tmpDir, Route{Prefix: "gt-", Path: "gastown"}); err != nil {
+		t.Fatalf("AppendRoute rejected same-rig path variant: %v", err)
+	}
+
+	routes, err := LoadRoutes(beadsDir)
+	if err != nil {
+		t.Fatalf("load routes: %v", err)
+	}
+	if len(routes) != 1 || routes[0].Prefix != "gt-" || routes[0].Path != "gastown" {
+		t.Fatalf("routes = %#v, want gt- -> gastown", routes)
+	}
+}
+
 func TestAppendRouteIfPrefixAvailableScansDuplicatePrefixes(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

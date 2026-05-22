@@ -484,8 +484,8 @@ func TestBeadsAppendRoute(t *testing.T) {
 		t.Errorf("expected 2 routes, got %d", len(routes))
 	}
 
-	// Update existing route (same prefix, different path)
-	route1Updated := beads.Route{Prefix: "gt-", Path: "newpath/mayor/rig"}
+	// Update existing route (same prefix, same rig path variant)
+	route1Updated := beads.Route{Prefix: "gt-", Path: "gastown"}
 	if err := beads.AppendRoute(tmpDir, route1Updated); err != nil {
 		t.Fatalf("AppendRoute update: %v", err)
 	}
@@ -497,9 +497,14 @@ func TestBeadsAppendRoute(t *testing.T) {
 	}
 
 	for _, r := range routes {
-		if r.Prefix == "gt-" && r.Path != "newpath/mayor/rig" {
+		if r.Prefix == "gt-" && r.Path != "gastown" {
 			t.Errorf("route update failed: got path %q", r.Path)
 		}
+	}
+
+	// Reject same-prefix rewrites to a different rig.
+	if err := beads.AppendRoute(tmpDir, beads.Route{Prefix: "gt-", Path: "newpath/mayor/rig"}); err == nil {
+		t.Fatal("AppendRoute allowed cross-rig prefix rewrite")
 	}
 }
 

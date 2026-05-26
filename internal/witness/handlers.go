@@ -877,6 +877,8 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		if assessment.Pending {
 			input.ActiveMRPending = true
 			input.ActiveMRReason = assessment.Reason
+		} else if input.CleanupStatus == polecat.CleanupUnpushed {
+			input.StaleCleanupSafe = true
 		}
 	}
 	return polecat.DecideSlotReuse(input)
@@ -3101,17 +3103,14 @@ func findAllCleanupWisps(bd *BdCli, workDir, polecatName string) []string {
 // See: gt-6a9d
 func hasPendingMR(bd *BdCli, workDir, rigName, polecatName, agentBeadID string) bool {
 	// Check 1: Cleanup wisp with merge-requested state (created by HandlePolecatDone)
-	wispID, _ := findCleanupWisp(bd, workDir, polecatName)
+	wispID, wispErr := findCleanupWisp(bd, workDir, polecatName)
+	if wispErr != nil || wispID != "" {
+		return true
+	}
 
 	// Check 2: active_mr on agent bead (set by gt done when MR is created)
 	activeMR, sourceHint := getAgentMRContext(bd, workDir, agentBeadID)
 	assessment := polecat.AssessActiveMR(beadCLIShower{bd: bd, workDir: workDir}, polecat.ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: activeMRGitSafe(workDir, rigName, polecatName)})
-	if activeMR != "" && !assessment.Pending {
-		return false
-	}
-	if wispID != "" {
-		return true
-	}
 	return assessment.Pending
 }
 
@@ -3119,7 +3118,10 @@ func hasPendingMR(bd *BdCli, workDir, rigName, polecatName, agentBeadID string) 
 // value from the agent bead snapshot, avoiding a redundant bd show call. (gt-2gra)
 func hasPendingMRFromSnapshot(bd *BdCli, workDir, rigName, polecatName string, snap *agentBeadSnapshot) bool {
 	// Check 1: Cleanup wisp with merge-requested state (created by HandlePolecatDone)
-	wispID, _ := findCleanupWisp(bd, workDir, polecatName)
+	wispID, wispErr := findCleanupWisp(bd, workDir, polecatName)
+	if wispErr != nil || wispID != "" {
+		return true
+	}
 
 	// Check 2: active_mr from pre-fetched snapshot
 	activeMR := ""
@@ -3141,12 +3143,6 @@ func hasPendingMRFromSnapshot(bd *BdCli, workDir, rigName, polecatName string, s
 		}
 	}
 	assessment := polecat.AssessActiveMR(beadCLIShower{bd: bd, workDir: workDir}, polecat.ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: activeMRGitSafe(workDir, rigName, polecatName)})
-	if activeMR != "" && !assessment.Pending {
-		return false
-	}
-	if wispID != "" {
-		return true
-	}
 	return assessment.Pending
 }
 

@@ -420,8 +420,8 @@ type reuseMRShower interface {
 	Show(issueID string) (*beads.Issue, error)
 }
 
-func activeMRBlocksReuse(bd reuseMRShower, mrID, sourceHint string) bool {
-	assessment := polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: mrID, SourceIssueHint: sourceHint})
+func activeMRBlocksReuse(bd reuseMRShower, mrID, sourceHint string, requireGitSafe, gitSafe bool) bool {
+	assessment := polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: mrID, SourceIssueHint: sourceHint, RequireGitSafe: requireGitSafe, GitSafe: gitSafe})
 	return assessment.Pending
 }
 
@@ -519,10 +519,25 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 					sourceHint = fields.HookBead
 				}
 			}
-			activeMRBlocks := activeMRBlocksReuse(bd, activeMR, sourceHint)
+			gitSafe := false
+			gitStateLoaded := false
+			loadGitSafe := func() bool {
+				if gitStateLoaded {
+					return gitSafe
+				}
+				gitStateLoaded = true
+				if gitState, gitErr := getGitState(p.ClonePath); gitErr == nil && gitState != nil && gitState.Clean {
+					gitSafe = true
+				}
+				return gitSafe
+			}
+			activeMRBlocks := false
+			if activeMR != "" {
+				activeMRBlocks = activeMRBlocksReuse(bd, activeMR, sourceHint, true, loadGitSafe())
+			}
 			staleCleanupSafe := false
 			if polecat.CleanupStatus(cleanupStatus) == polecat.CleanupUnpushed && !activeMRBlocks && hookBead == "" && isAssignedBeadTerminal(bd, sourceHint) {
-				if gitState, gitErr := getGitState(p.ClonePath); gitErr == nil && gitState != nil && gitState.Clean {
+				if loadGitSafe() {
 					staleCleanupSafe = true
 				}
 			}

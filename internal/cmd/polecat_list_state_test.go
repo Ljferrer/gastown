@@ -139,6 +139,7 @@ func TestActiveMRBlocksReuse(t *testing.T) {
 		name       string
 		mrID       string
 		sourceHint string
+		gitSafe    bool
 		bd         reuseMRShower
 		want       bool
 	}{
@@ -153,8 +154,16 @@ func TestActiveMRBlocksReuse(t *testing.T) {
 			name:       "closed MR with terminal source does not block reuse",
 			mrID:       "mr-1",
 			sourceHint: "gt-closed",
+			gitSafe:    true,
 			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": &beads.Issue{ID: "mr-1", Status: "closed"}, "gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}}},
 			want:       false,
+		},
+		{
+			name:       "closed MR with terminal source blocks when git unsafe",
+			mrID:       "mr-1",
+			sourceHint: "gt-closed",
+			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"mr-1": &beads.Issue{ID: "mr-1", Status: "closed"}, "gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}}},
+			want:       true,
 		},
 		{
 			name: "closed MR without source blocks conservatively",
@@ -178,6 +187,7 @@ func TestActiveMRBlocksReuse(t *testing.T) {
 			name:       "missing MR with terminal source does not block reuse",
 			mrID:       "mr-1",
 			sourceHint: "gt-closed",
+			gitSafe:    true,
 			bd:         fakeReuseMapShower{issues: map[string]*beads.Issue{"gt-closed": &beads.Issue{ID: "gt-closed", Status: "closed"}}},
 			want:       false,
 		},
@@ -185,7 +195,7 @@ func TestActiveMRBlocksReuse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := activeMRBlocksReuse(tt.bd, tt.mrID, tt.sourceHint); got != tt.want {
+			if got := activeMRBlocksReuse(tt.bd, tt.mrID, tt.sourceHint, true, tt.gitSafe); got != tt.want {
 				t.Fatalf("activeMRBlocksReuse() = %v, want %v", got, tt.want)
 			}
 		})

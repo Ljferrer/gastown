@@ -608,6 +608,68 @@ func TestHasPendingMRUsesAgentLastSourceIssue(t *testing.T) {
 	}
 }
 
+func TestHasPendingMRFromSnapshotRequiresGitSafe(t *testing.T) {
+	bd, _ := mockBd(
+		func(args []string) (string, error) {
+			if len(args) == 0 {
+				return "", nil
+			}
+			switch args[0] {
+			case "list":
+				return "[]", nil
+			case "show":
+				if args[1] == "gt-mr" {
+					return "", errors.New("not found")
+				}
+				return `[{"id":"gt-src","status":"closed"}]`, nil
+			}
+			return "", nil
+		},
+		func(args []string) error { return nil },
+	)
+	snap := &agentBeadSnapshot{ActiveMR: "gt-mr", Fields: &beads.AgentFields{ActiveMR: "gt-mr", LastSourceIssue: "gt-src"}}
+	if got := hasPendingMRFromSnapshot(bd, t.TempDir(), "gastown", "nux", snap); !got {
+		t.Fatalf("hasPendingMRFromSnapshot() = false, want true when git is unsafe")
+	}
+}
+
+func TestHasPendingMRCleanupWispFailsClosed(t *testing.T) {
+	workDir := setupActiveMRGitSafeWorkDir(t, "gastown", "nux")
+	tests := []struct {
+		name string
+		list string
+		err  error
+	}{
+		{name: "cleanup wisp present", list: `[{"id":"gt-cleanup"}]`},
+		{name: "cleanup wisp lookup error", err: errors.New("bd exploded")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bd, _ := mockBd(
+				func(args []string) (string, error) {
+					if len(args) == 0 {
+						return "", nil
+					}
+					if args[0] == "list" {
+						return tt.list, tt.err
+					}
+					if args[0] == "show" && args[1] == "gt-agent" {
+						return `[{"active_mr":"gt-mr","description":"active_mr: gt-mr\nlast_source_issue: gt-src\n"}]`, nil
+					}
+					if args[0] == "show" && args[1] == "gt-mr" {
+						return "", errors.New("not found")
+					}
+					return `[{"id":"gt-src","status":"closed"}]`, nil
+				},
+				func(args []string) error { return nil },
+			)
+			if got := hasPendingMR(bd, workDir, "gastown", "nux", "gt-agent"); !got {
+				t.Fatalf("hasPendingMR() = false, want true")
+			}
+		})
+	}
+}
+
 func TestFindCleanupWisp_UsesCorrectBdListFlags(t *testing.T) {
 	t.Parallel()
 	bd, mock := fakeBd()

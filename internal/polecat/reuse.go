@@ -9,18 +9,19 @@ var ErrPolecatNeedsRecovery = errors.New("polecat needs recovery before reuse")
 // SlotReuseInput is the shared input for deciding whether a polecat slot can be
 // advertised as open and destructively reused for new work.
 type SlotReuseInput struct {
-	State           State
-	HookBead        string
-	CleanupStatus   CleanupStatus
-	PushFailed      bool
-	MRFailed        bool
-	Branch          string
-	GitDirty        bool
-	StashCount      int
-	UnpushedCommits int
-	GitCheckFailed  bool
-	ActiveMRPending bool
-	ActiveMRReason  string
+	State            State
+	HookBead         string
+	CleanupStatus    CleanupStatus
+	PushFailed       bool
+	MRFailed         bool
+	Branch           string
+	GitDirty         bool
+	StashCount       int
+	UnpushedCommits  int
+	GitCheckFailed   bool
+	ActiveMRPending  bool
+	ActiveMRReason   string
+	StaleCleanupSafe bool
 }
 
 // SlotReuseDecision explains whether a polecat can be reused and why not.
@@ -51,10 +52,14 @@ func DecideSlotReuse(in SlotReuseInput) SlotReuseDecision {
 		return SlotReuseDecision{Reason: "active-mr-pending"}
 	}
 	if !in.CleanupStatus.IsSafe() {
-		if in.CleanupStatus == "" {
-			return SlotReuseDecision{Reason: "cleanup-unknown"}
+		if in.StaleCleanupSafe {
+			// Continue: direct git/source/MR checks proved cleanup_status stale.
+		} else {
+			if in.CleanupStatus == "" {
+				return SlotReuseDecision{Reason: "cleanup-unknown"}
+			}
+			return SlotReuseDecision{Reason: "cleanup-" + string(in.CleanupStatus)}
 		}
-		return SlotReuseDecision{Reason: "cleanup-" + string(in.CleanupStatus)}
 	}
 	if in.GitCheckFailed {
 		return SlotReuseDecision{Reason: "git-check-failed"}

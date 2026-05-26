@@ -2227,6 +2227,8 @@ func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDec
 		if assessment.Pending {
 			input.ActiveMRPending = true
 			input.ActiveMRReason = assessment.Reason
+		} else if input.CleanupStatus == CleanupUnpushed {
+			input.StaleCleanupSafe = true
 		}
 	}
 	return DecideSlotReuse(input)

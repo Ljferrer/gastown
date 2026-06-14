@@ -1863,13 +1863,14 @@ func TestMRFieldsRoundTrip(t *testing.T) {
 // format→parse round-trip on the MR bead (panel persistence across restart).
 func TestMRFieldsAuditRoundTrip(t *testing.T) {
 	original := &MRFields{
-		Branch:        "polecat/Mary/lgt-xyz",
-		Target:        "main",
-		SourceIssue:   "lgt-xyz",
-		AuditSHA:      "abc123def456",
-		AuditRound:    2,
-		AuditDeadline: "2026-06-14T12:00:00Z",
-		AuditSeats:    "Mary,Teresa",
+		Branch:            "polecat/Mary/lgt-xyz",
+		Target:            "main",
+		SourceIssue:       "lgt-xyz",
+		AuditSHA:          "abc123def456",
+		AuditRound:        2,
+		AuditDeadline:     "2026-06-14T12:00:00Z",
+		AuditSeats:        "Mary,Teresa",
+		AuditFixSentRound: 1,
 	}
 
 	issue := &Issue{Description: FormatMRFields(original)}

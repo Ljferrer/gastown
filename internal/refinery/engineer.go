@@ -1890,7 +1890,65 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 		mrs = append(mrs, issueToMRInfo(issue, fields))
 	}
 
-	return mrs, nil
+	// Nun audit gate (opt-in — lgt-k4x, Mayor decision: Option C). This is the
+	// chokepoint the refinery *agent* already consults via `gt refinery ready`,
+	// so running auditGate() here is what finally wires the gate into the LIVE
+	// merge path: the agent performs the actual merge and never calls auditGate
+	// itself. When the gate is enabled we run it as a side effect for every
+	// candidate MR and EXCLUDE any whose audit is still pending (panel armed,
+	// verdicts not yet unanimous at HEAD, parked, or an infra fault mid-gate).
+	// The agent therefore never sees an un-approved MR as mergeable, so an
+	// un-audited change can never land — fail-closed. When the gate is disabled
+	// auditGate short-circuits to a zero result, so this is a no-op and the
+	// off-by-default contract is preserved.
+	if !e.auditEnabled() {
+		return mrs, nil
+	}
+	now := time.Now()
+	ready, held := excludeAuditPending(mrs, func(mr *MRInfo) ProcessResult {
+		return e.auditGate(mr, now)
+	})
+	for _, h := range held {
+		if h.Result.Error != "" {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s held from ready by audit gate: %s\n", h.MR.ID, h.Result.Error)
+		} else {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s held from ready — audit pending (not yet unanimously approved at HEAD)\n", h.MR.ID)
+		}
+	}
+	return ready, nil
+}
+
+// heldMR pairs an MR excluded from the ready set with the audit gate result that
+// held it back, so the caller can log a meaningful reason (infra error vs.
+// ordinary audit-pending park).
+type heldMR struct {
+	MR     *MRInfo
+	Result ProcessResult
+}
+
+// excludeAuditPending partitions candidate-ready MRs into those the audit gate
+// cleared to merge and those it held back. An MR is HELD whenever its gate
+// result is AuditPending — the panel is still arming, verdicts are not yet a
+// live unanimous approval of the current HEAD, the MR is parked (round limit /
+// seat exhaustion), or an infra fault occurred mid-gate. Held MRs are excluded
+// from `ready`, so the refinery agent can only ever select a gate-cleared MR:
+// no merge without unanimous live approvals (fail-closed). The trusted-operator
+// escape valves (`gt audit override` / `gt audit solo`) are resolved inside
+// auditGate, which returns a non-pending result for them, so an overridden or
+// solo-approved MR flows through here back into `ready`.
+//
+// `gate` is injected so this exclusion logic is unit-testable without real
+// beads/git/seat I/O. Order is preserved.
+func excludeAuditPending(mrs []*MRInfo, gate func(*MRInfo) ProcessResult) (ready []*MRInfo, held []heldMR) {
+	for _, mr := range mrs {
+		res := gate(mr)
+		if res.AuditPending {
+			held = append(held, heldMR{MR: mr, Result: res})
+			continue
+		}
+		ready = append(ready, mr)
+	}
+	return ready, held
 }
 
 // ListBlockedMRs returns MRs that are blocked by open tasks.

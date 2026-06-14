@@ -223,3 +223,69 @@ func TestReadyGate_WithoutLoadConfig_AuditStaysOffMRsFlowThrough(t *testing.T) {
 		t.Fatalf("ready = %v, want [mr-a] flowing through the disabled gate", got)
 	}
 }
+
+// TestResolveMRHead_RemoteOnlyBranch is the lgt-6g4 regression. The audit gate
+// resolves the MR's HEAD before it can arm a Nun panel. A merge-queue branch
+// exists in the refinery worktree only as a remote-tracking ref (origin/<branch>);
+// the local ref does not exist. Resolving the BARE branch name fails closed with
+// "unknown revision", so the gate parked the queue on every MR in an audit-enabled
+// rig and no panel ever convened. resolveMRHead must resolve such a branch via
+// origin/<branch> instead — mirroring the remote-ref resolution the merge path
+// already uses — so the gate proceeds to arm a panel rather than error.
+func TestResolveMRHead_RemoteOnlyBranch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	// The exact branch shape from the live repro: present only as origin/<branch>,
+	// no local ref. The @mqedg15y suffix is incidental — it resolves fine once the
+	// origin/ prefix is applied.
+	const branch = "polecat/furiosa/gtt-zem@mqedg15y"
+	createRemoteOnlyBranch(t, workDir, branch, "a.txt", "hello a\n")
+
+	e := newTestEngineer(t, workDir, g)
+
+	// Precondition (the bug): the bare branch name does NOT resolve, because the
+	// local ref was never created. This is what produced
+	// "git rev-parse: fatal: ambiguous argument ...: unknown revision".
+	if _, err := e.git.Rev(branch); err == nil {
+		t.Fatal("precondition failed: bare branch name resolved; the repro requires a remote-only branch")
+	}
+
+	// The fix: resolveMRHead resolves the same branch via origin/<branch>.
+	head, err := e.resolveMRHead(branch)
+	if err != nil {
+		t.Fatalf("resolveMRHead must resolve a remote-only branch via origin/<branch>, got error: %v", err)
+	}
+
+	// It must equal origin/<branch>'s tip — the commit the merge path lands.
+	want := run(t, workDir, "git", "rev-parse", "origin/"+branch)
+	if head != want {
+		t.Errorf("resolveMRHead = %s, want %s (origin/<branch> tip)", head, want)
+	}
+}
+
+// TestResolveMRHead_LocalBranchFallback pins the fallback half of the lgt-6g4 fix:
+// when a branch exists only as a LOCAL ref (no origin/<branch>), resolveMRHead must
+// still resolve it via the bare name. This keeps the gate working for any
+// local-only branch and guarantees the origin/-first change did not regress the
+// previously-working path.
+func TestResolveMRHead_LocalBranchFallback(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	// createFeatureBranch leaves a local ref and never pushes, so origin/feature-a
+	// does not exist — the bare-name fallback must carry it.
+	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
+
+	e := newTestEngineer(t, workDir, g)
+
+	head, err := e.resolveMRHead("feature-a")
+	if err != nil {
+		t.Fatalf("resolveMRHead must fall back to the bare branch name for a local-only branch, got error: %v", err)
+	}
+
+	want := run(t, workDir, "git", "rev-parse", "feature-a")
+	if head != want {
+		t.Errorf("resolveMRHead = %s, want %s (local branch tip)", head, want)
+	}
+}

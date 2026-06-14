@@ -13,19 +13,19 @@ import (
 // AttachmentFields holds the attachment info for pinned beads.
 // These fields track which molecule is attached to a handoff/pinned bead.
 type AttachmentFields struct {
-	AttachedMolecule string // Root issue ID of the attached molecule
-	AttachedFormula  string // Formula name (e.g., "mol-polecat-work") for inline step display
-	AttachedAt       string // ISO 8601 timestamp when attached
-	AttachedArgs     string // Natural language args passed via gt sling --args (no-tmux mode)
+	AttachedMolecule string   // Root issue ID of the attached molecule
+	AttachedFormula  string   // Formula name (e.g., "mol-polecat-work") for inline step display
+	AttachedAt       string   // ISO 8601 timestamp when attached
+	AttachedArgs     string   // Natural language args passed via gt sling --args (no-tmux mode)
 	AttachedVars     []string // Formula variables passed via gt sling --var
-	DispatchedBy     string // Agent ID that dispatched this work (for completion notification)
-	NoMerge          bool   // If true, gt done skips merge queue (for upstream PRs/human review)
-	ReviewOnly       bool   // If true, assignee must evaluate and report back — no merge/commit/push
-	Mode             string // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
-	ConvoyID         string // Convoy bead ID tracking this issue (e.g., "hq-cv-abc")
-	MergeStrategy    string // Convoy merge strategy: "direct", "mr", "local", or "" (default = mr)
-	ConvoyOwned      bool   // If true, convoy has gt:owned label (caller-managed lifecycle)
-	FormulaVars      string // Newline-separated key=value pairs for formula template substitution
+	DispatchedBy     string   // Agent ID that dispatched this work (for completion notification)
+	NoMerge          bool     // If true, gt done skips merge queue (for upstream PRs/human review)
+	ReviewOnly       bool     // If true, assignee must evaluate and report back — no merge/commit/push
+	Mode             string   // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
+	ConvoyID         string   // Convoy bead ID tracking this issue (e.g., "hq-cv-abc")
+	MergeStrategy    string   // Convoy merge strategy: "direct", "mr", "local", or "" (default = mr)
+	ConvoyOwned      bool     // If true, convoy has gt:owned label (caller-managed lifecycle)
+	FormulaVars      string   // Newline-separated key=value pairs for formula template substitution
 }
 
 // ParseAttachmentFields extracts attachment fields from an issue's description.
@@ -187,7 +187,7 @@ func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
 		"nomerge":           true,
 		"review_only":       true,
 		"review-only":       true,
-		"reviewonly":         true,
+		"reviewonly":        true,
 		"mode":              true,
 		"convoy_id":         true,
 		"convoy-id":         true,
@@ -604,6 +604,14 @@ type MRFields struct {
 	PreVerified     bool   // Polecat ran full gates after rebasing onto target
 	PreVerifiedAt   string // ISO 8601 timestamp when verification completed
 	PreVerifiedBase string // Target branch SHA at verification time
+
+	// Nun audit-gate panel state (refinery-nun-audit-gate.md). Persisted on the
+	// MR bead so the audit panel survives a Refinery restart — the bead is the
+	// source of truth, re-read rather than respawned.
+	AuditSHA      string // Branch HEAD at panel-spawn time (the SHA under review this round)
+	AuditRound    int    // 1-based round counter (panel-wide)
+	AuditDeadline string // ISO 8601 wall-clock deadline for the current round
+	AuditSeats    string // Comma-separated leased Nun roster names for this panel
 }
 
 // ParseMRFields extracts structured merge-request fields from an issue's description.
@@ -690,6 +698,20 @@ func ParseMRFields(issue *Issue) *MRFields {
 		case "pre_verified_base", "pre-verified-base", "preverifiedbase":
 			fields.PreVerifiedBase = value
 			hasFields = true
+		case "audit_sha", "audit-sha", "auditsha":
+			fields.AuditSHA = value
+			hasFields = true
+		case "audit_round", "audit-round", "auditround":
+			if n, err := parseIntField(value); err == nil {
+				fields.AuditRound = n
+				hasFields = true
+			}
+		case "audit_deadline", "audit-deadline", "auditdeadline":
+			fields.AuditDeadline = value
+			hasFields = true
+		case "audit_seats", "audit-seats", "auditseats":
+			fields.AuditSeats = value
+			hasFields = true
 		}
 	}
 
@@ -766,6 +788,18 @@ func FormatMRFields(fields *MRFields) string {
 	if fields.PreVerifiedBase != "" {
 		lines = append(lines, "pre_verified_base: "+fields.PreVerifiedBase)
 	}
+	if fields.AuditSHA != "" {
+		lines = append(lines, "audit_sha: "+fields.AuditSHA)
+	}
+	if fields.AuditRound > 0 {
+		lines = append(lines, fmt.Sprintf("audit_round: %d", fields.AuditRound))
+	}
+	if fields.AuditDeadline != "" {
+		lines = append(lines, "audit_deadline: "+fields.AuditDeadline)
+	}
+	if fields.AuditSeats != "" {
+		lines = append(lines, "audit_seats: "+fields.AuditSeats)
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -780,50 +814,62 @@ func SetMRFields(issue *Issue, fields *MRFields) string {
 
 	// Known MR field keys (lowercase)
 	mrKeys := map[string]bool{
-		"branch":             true,
-		"target":             true,
-		"source_issue":       true,
-		"source-issue":       true,
-		"sourceissue":        true,
-		"worker":             true,
-		"rig":                true,
-		"commit_sha":         true,
-		"commit-sha":         true,
-		"commitsha":          true,
-		"merge_commit":       true,
-		"merge-commit":       true,
-		"mergecommit":        true,
-		"close_reason":       true,
-		"close-reason":       true,
-		"closereason":        true,
-		"agent_bead":         true,
-		"agent-bead":         true,
-		"agentbead":          true,
-		"retry_count":        true,
-		"retry-count":        true,
-		"retrycount":         true,
-		"last_conflict_sha":  true,
-		"last-conflict-sha":  true,
-		"lastconflictsha":    true,
-		"conflict_task_id":   true,
-		"conflict-task-id":   true,
-		"conflicttaskid":     true,
-		"convoy_id":          true,
-		"convoy-id":          true,
-		"convoyid":           true,
-		"convoy":             true,
-		"convoy_created_at":  true,
-		"convoy-created-at":  true,
-		"convoycreatedat":    true,
-		"pre_verified":       true,
-		"pre-verified":       true,
-		"preverified":        true,
-		"pre_verified_at":    true,
-		"pre-verified-at":    true,
-		"preverifiedat":      true,
-		"pre_verified_base":  true,
-		"pre-verified-base":  true,
-		"preverifiedbase":    true,
+		"branch":            true,
+		"target":            true,
+		"source_issue":      true,
+		"source-issue":      true,
+		"sourceissue":       true,
+		"worker":            true,
+		"rig":               true,
+		"commit_sha":        true,
+		"commit-sha":        true,
+		"commitsha":         true,
+		"merge_commit":      true,
+		"merge-commit":      true,
+		"mergecommit":       true,
+		"close_reason":      true,
+		"close-reason":      true,
+		"closereason":       true,
+		"agent_bead":        true,
+		"agent-bead":        true,
+		"agentbead":         true,
+		"retry_count":       true,
+		"retry-count":       true,
+		"retrycount":        true,
+		"last_conflict_sha": true,
+		"last-conflict-sha": true,
+		"lastconflictsha":   true,
+		"conflict_task_id":  true,
+		"conflict-task-id":  true,
+		"conflicttaskid":    true,
+		"convoy_id":         true,
+		"convoy-id":         true,
+		"convoyid":          true,
+		"convoy":            true,
+		"convoy_created_at": true,
+		"convoy-created-at": true,
+		"convoycreatedat":   true,
+		"pre_verified":      true,
+		"pre-verified":      true,
+		"preverified":       true,
+		"pre_verified_at":   true,
+		"pre-verified-at":   true,
+		"preverifiedat":     true,
+		"pre_verified_base": true,
+		"pre-verified-base": true,
+		"preverifiedbase":   true,
+		"audit_sha":         true,
+		"audit-sha":         true,
+		"auditsha":          true,
+		"audit_round":       true,
+		"audit-round":       true,
+		"auditround":        true,
+		"audit_deadline":    true,
+		"audit-deadline":    true,
+		"auditdeadline":     true,
+		"audit_seats":       true,
+		"audit-seats":       true,
+		"auditseats":        true,
 	}
 
 	// Collect non-MR lines from existing description

@@ -290,6 +290,14 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 // processSingleMR handles the degenerate case of a batch with one MR.
 func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target string) *BatchResult {
 	result := &BatchResult{}
+
+	// Nun audit gate (opt-in). An un-audited or not-yet-approved MR is parked,
+	// not merged — doMerge below only ever sees pre-approved MRs.
+	if gate := e.auditGate(mr, time.Now()); gate.AuditPending {
+		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: audit pending, will retry\n", mr.ID)
+		return result
+	}
+
 	processResult := e.doMerge(ctx, mr.Branch, target, mr.SourceIssue)
 	if processResult.Success {
 		result.Merged = []*MRInfo{mr}

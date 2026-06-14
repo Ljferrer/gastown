@@ -14,11 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // Common errors
@@ -30,10 +27,10 @@ var (
 
 // LockInfo contains information about who holds a lock.
 type LockInfo struct {
-	PID       int       `json:"pid"`
+	PID        int       `json:"pid"`
 	AcquiredAt time.Time `json:"acquired_at"`
-	SessionID string    `json:"session_id,omitempty"`
-	Hostname  string    `json:"hostname,omitempty"`
+	SessionID  string    `json:"session_id,omitempty"`
+	Hostname   string    `json:"hostname,omitempty"`
 }
 
 // IsStale checks if the lock is stale (owning process is dead).
@@ -256,139 +253,54 @@ func FindAllLocks(root string) (map[string]*LockInfo, error) {
 	return locks, err
 }
 
-// CleanStaleLocks removes all stale locks in a directory tree.
-// Returns the number of stale locks cleaned.
-// A lock is only truly stale if BOTH the PID is dead AND the tmux session
-// doesn't exist. This prevents killing active workers whose spawning process
-// has exited (which is normal - Claude runs as a child in tmux).
+// CleanStaleLocks removes stale agent locks (those whose recorded PID is dead)
+// in a directory tree. Returns the number of stale locks cleaned.
+//
+// This uses the same dead-PID predicate as `gt agents check`
+// (LockInfo.IsStale) so that check and fix stay in lockstep: every lock that
+// check flags as stale, fix removes. Previously fix additionally skipped any
+// dead-PID lock whose recorded session name still appeared among the active
+// tmux sessions. That guard silently protected orphaned rig-worktree locks
+// whenever a worker respawned and reused the same session name, leaving
+// dead-PID locks that `gt agents check` reported but `gt agents fix` could
+// never clean.
+//
+// A live worker's active identity lock records a live PID (IsStale is false),
+// so it is never touched. The only guard is the current session/process: a
+// stale lock belonging to the session running this command is left in place so
+// an agent can safely run `gt agents fix` on its own town without yanking its
+// own lock.
 func CleanStaleLocks(root string) (int, error) {
 	locks, err := FindAllLocks(root)
 	if err != nil {
 		return 0, err
 	}
 
-	// Get active tmux sessions to verify locks
-	activeSessions := getActiveTmuxSessions()
-	sessionSet := make(map[string]bool)
-	for _, s := range activeSessions {
-		sessionSet[s] = true
-	}
+	currentPID := os.Getpid()
+	currentSession := os.Getenv("TMUX_PANE")
 
 	cleaned := 0
 	for workerDir, info := range locks {
-		if info.IsStale() {
-			// PID is dead, but check if session still exists
-			if info.SessionID != "" && sessionSet[info.SessionID] {
-				// Session exists - worker is alive, don't clean
-				continue
-			}
-			// Both PID dead AND no session = truly stale
-			lock := New(workerDir)
-			if err := lock.Release(); err == nil {
-				cleaned++
-			}
+		if !info.IsStale() {
+			// PID is alive — this is a live agent's active lock. Never touch.
+			continue
+		}
+		// PID is verifiably dead. Guard against yanking the lock that belongs
+		// to the session/process running this cleanup (a dead PID cannot equal
+		// our live PID, but match defensively and by session as well).
+		if info.PID == currentPID {
+			continue
+		}
+		if currentSession != "" && info.SessionID == currentSession {
+			continue
+		}
+		lock := New(workerDir)
+		if err := lock.Release(); err == nil {
+			cleaned++
 		}
 	}
 
 	return cleaned, nil
-}
-
-// getActiveTmuxSessions returns a list of active tmux session identifiers.
-// Returns both session names (gt-foo-bar) and session IDs in various formats
-// (%N, $N) to handle different lock file formats.
-func getActiveTmuxSessions() []string {
-	// Get both session name and ID to handle different lock formats
-	// Format: "session_name:session_id" e.g., "gt-beads-crew-dave:$55"
-	// Use the town's tmux socket so we query the correct server.
-	// Without -L, bare "tmux" queries the "default" socket, which misses
-	// all sessions on the per-town socket (e.g., "gt-a1b2c3") and causes
-	// CleanStaleLocks to incorrectly remove locks for active sessions.
-	args := []string{}
-	if sock := tmux.GetDefaultSocket(); sock != "" {
-		args = append(args, "-L", sock)
-	}
-	args = append(args, "list-sessions", "-F", "#{session_name}:#{session_id}")
-	cmd := execCommand("tmux", args...)
-	output, err := cmd.Output()
-	if err != nil {
-		return nil // tmux not running or not installed
-	}
-
-	var sessions []string
-	for _, line := range splitLines(string(output)) {
-		if line == "" {
-			continue
-		}
-		// Parse "name:$id" format
-		parts := splitOnColon(line)
-		if len(parts) >= 1 {
-			sessions = append(sessions, parts[0]) // session name
-		}
-		if len(parts) >= 2 {
-			id := parts[1]
-			sessions = append(sessions, id) // $N format
-			// Also add %N format (old tmux style) for compatibility
-			if len(id) > 0 && id[0] == '$' {
-				sessions = append(sessions, "%"+id[1:])
-			}
-		}
-	}
-	return sessions
-}
-
-// splitOnColon splits on the first colon only (session names shouldn't have colons)
-func splitOnColon(s string) []string {
-	idx := -1
-	for i := 0; i < len(s); i++ {
-		if s[i] == ':' {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return []string{s}
-	}
-	return []string{s[:idx], s[idx+1:]}
-}
-
-// execCommand is a wrapper for exec.Command to allow testing
-var execCommand = func(name string, args ...string) interface{ Output() ([]byte, error) } {
-	return realExecCommand(name, args...)
-}
-
-func realExecCommand(name string, args ...string) interface{ Output() ([]byte, error) } {
-	return &execCmdWrapper{name: name, args: args}
-}
-
-type execCmdWrapper struct {
-	name string
-	args []string
-}
-
-func (c *execCmdWrapper) Output() ([]byte, error) {
-	cmd := exec.Command(c.name, c.args...) //nolint:gosec // G204: command args are controlled internally
-	setProcessGroup(cmd)
-	return cmd.Output()
-}
-
-// splitLines splits a string into lines, handling both \n and \r\n
-func splitLines(s string) []string {
-	var lines []string
-	var current []byte
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, string(current))
-			current = nil
-		} else if s[i] == '\r' {
-			// Skip \r
-		} else {
-			current = append(current, s[i])
-		}
-	}
-	if len(current) > 0 {
-		lines = append(lines, string(current))
-	}
-	return lines
 }
 
 // DetectCollisions finds workers with multiple agents claiming the same identity.

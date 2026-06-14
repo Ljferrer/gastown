@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func TestNew(t *testing.T) {
@@ -26,8 +24,8 @@ func TestNew(t *testing.T) {
 
 func TestLockInfo_IsStale(t *testing.T) {
 	tests := []struct {
-		name     string
-		pid      int
+		name      string
+		pid       int
 		wantStale bool
 	}{
 		{"current process", os.Getpid(), false},
@@ -391,18 +389,12 @@ func TestFindAllLocks(t *testing.T) {
 }
 
 func TestCleanStaleLocks(t *testing.T) {
-	// Save and restore execCommand
-	origExecCommand := execCommand
-	defer func() { execCommand = origExecCommand }()
-
-	// Mock tmux to return no active sessions
-	execCommand = func(name string, args ...string) interface{ Output() ([]byte, error) } {
-		return &mockCmd{output: []byte("")}
-	}
+	// No current session, so the current-session guard never applies.
+	t.Setenv("TMUX_PANE", "")
 
 	tmpDir := t.TempDir()
 
-	// Create a stale lock
+	// Create a stale lock (dead PID)
 	runtimeDir := filepath.Join(tmpDir, "stale-worker", ".runtime")
 	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
 		t.Fatal(err)
@@ -454,126 +446,80 @@ func TestCleanStaleLocks(t *testing.T) {
 	}
 }
 
-type mockCmd struct {
-	output []byte
-	err    error
-}
+// TestCleanStaleLocksRemovesDeadPIDWithReusedSession is the regression test for
+// lgt-4qq: a dead-PID lock must be cleaned even when its recorded session name
+// still belongs to a live, respawned agent. The old guard skipped any dead-PID
+// lock whose session name appeared among active tmux sessions, which left
+// orphaned rig-worktree locks that `gt agents check` flagged but `gt agents fix`
+// could never clean. Fix now mirrors check's dead-PID predicate.
+func TestCleanStaleLocksRemovesDeadPIDWithReusedSession(t *testing.T) {
+	// A non-empty current session that does NOT match the orphan's session.
+	t.Setenv("TMUX_PANE", "%999")
 
-func (m *mockCmd) Output() ([]byte, error) {
-	return m.output, m.err
-}
+	tmpDir := t.TempDir()
 
-func TestGetActiveTmuxSessions(t *testing.T) {
-	// Save and restore execCommand
-	origExecCommand := execCommand
-	defer func() { execCommand = origExecCommand }()
-
-	// Mock tmux output
-	execCommand = func(name string, args ...string) interface{ Output() ([]byte, error) } {
-		return &mockCmd{output: []byte("session1:$1\nsession2:$2\n")}
+	// Orphaned rig-worktree lock: dead PID, but its session name is one that a
+	// respawned agent is now reusing (i.e. it would appear "active").
+	runtimeDir := filepath.Join(tmpDir, "rig", "polecats", "obsidian", "rig", ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	orphan := LockInfo{
+		PID:        999999999, // dead
+		AcquiredAt: time.Now().Add(-time.Hour),
+		SessionID:  "gt-lgt-obsidian", // reused by the live respawn
+	}
+	data, _ := json.Marshal(orphan)
+	lockPath := filepath.Join(runtimeDir, "agent.lock")
+	if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		t.Fatal(err)
 	}
 
-	sessions := getActiveTmuxSessions()
-
-	// Should contain session names and IDs
-	expected := map[string]bool{
-		"session1": true,
-		"session2": true,
-		"$1":       true,
-		"$2":       true,
-		"%1":       true,
-		"%2":       true,
+	cleaned, err := CleanStaleLocks(tmpDir)
+	if err != nil {
+		t.Fatalf("CleanStaleLocks() error = %v", err)
 	}
-
-	for _, s := range sessions {
-		if !expected[s] {
-			t.Errorf("Unexpected session: %s", s)
-		}
+	if cleaned != 1 {
+		t.Errorf("CleanStaleLocks() cleaned %d, want 1 (orphan with reused session must be removed)", cleaned)
 	}
-}
-
-func TestGetActiveTmuxSessionsUsesSocket(t *testing.T) {
-	// Save and restore execCommand and tmux socket
-	origExecCommand := execCommand
-	defer func() { execCommand = origExecCommand }()
-
-	origSocket := tmux.GetDefaultSocket()
-	defer tmux.SetDefaultSocket(origSocket)
-
-	// Set a custom socket name
-	tmux.SetDefaultSocket("test-town")
-
-	var capturedArgs []string
-	execCommand = func(name string, args ...string) interface{ Output() ([]byte, error) } {
-		capturedArgs = args
-		return &mockCmd{output: []byte("")}
-	}
-
-	getActiveTmuxSessions()
-
-	// Verify -L flag was included with the correct socket
-	foundSocket := false
-	for i, arg := range capturedArgs {
-		if arg == "-L" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "test-town" {
-			foundSocket = true
-			break
-		}
-	}
-	if !foundSocket {
-		t.Errorf("getActiveTmuxSessions() args = %v, want -L test-town", capturedArgs)
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Error("orphaned dead-PID lock should be removed even when its session name is reused")
 	}
 }
 
-func TestSplitOnColon(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected []string
-	}{
-		{"a:b", []string{"a", "b"}},
-		{"abc", []string{"abc"}},
-		{"a:b:c", []string{"a", "b:c"}},
-		{":b", []string{"", "b"}},
-		{"a:", []string{"a", ""}},
+// TestCleanStaleLocksPreservesCurrentSession verifies the only guard: a stale
+// lock belonging to the session running the cleanup is left in place so an
+// agent does not yank its own lock when running `gt agents fix`.
+func TestCleanStaleLocksPreservesCurrentSession(t *testing.T) {
+	const currentSession = "%42"
+	t.Setenv("TMUX_PANE", currentSession)
+
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "self", ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Dead PID, but session matches the current session.
+	ours := LockInfo{
+		PID:        999999999,
+		AcquiredAt: time.Now(),
+		SessionID:  currentSession,
+	}
+	data, _ := json.Marshal(ours)
+	lockPath := filepath.Join(runtimeDir, "agent.lock")
+	if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		t.Fatal(err)
 	}
 
-	for _, tt := range tests {
-		result := splitOnColon(tt.input)
-		if len(result) != len(tt.expected) {
-			t.Errorf("splitOnColon(%q) = %v, want %v", tt.input, result, tt.expected)
-			continue
-		}
-		for i := range result {
-			if result[i] != tt.expected[i] {
-				t.Errorf("splitOnColon(%q)[%d] = %q, want %q", tt.input, i, result[i], tt.expected[i])
-			}
-		}
+	cleaned, err := CleanStaleLocks(tmpDir)
+	if err != nil {
+		t.Fatalf("CleanStaleLocks() error = %v", err)
 	}
-}
-
-func TestSplitLines(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected []string
-	}{
-		{"a\nb\nc", []string{"a", "b", "c"}},
-		{"a\r\nb\r\nc", []string{"a", "b", "c"}},
-		{"single", []string{"single"}},
-		{"", []string{}},
-		{"a\n", []string{"a"}},
-		{"a\nb", []string{"a", "b"}},
+	if cleaned != 0 {
+		t.Errorf("CleanStaleLocks() cleaned %d, want 0 (current session's lock must be preserved)", cleaned)
 	}
-
-	for _, tt := range tests {
-		result := splitLines(tt.input)
-		if len(result) != len(tt.expected) {
-			t.Errorf("splitLines(%q) = %v, want %v", tt.input, result, tt.expected)
-			continue
-		}
-		for i := range result {
-			if result[i] != tt.expected[i] {
-				t.Errorf("splitLines(%q)[%d] = %q, want %q", tt.input, i, result[i], tt.expected[i])
-			}
-		}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Error("current session's lock should not be removed")
 	}
 }
 

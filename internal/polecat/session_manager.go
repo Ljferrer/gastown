@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/seat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -76,6 +77,17 @@ type SessionStartOptions struct {
 	// If set, GT_AGENT is written to the tmux session environment table so that
 	// IsAgentAlive and waitForPolecatReady read the correct process names.
 	Agent string
+
+	// Restricted spawns a read-only audit "seat" (Nun): Claude launches WITHOUT
+	// --dangerously-skip-permissions and with the curated allow/deny profile at
+	// SettingsPath. Defense-in-depth on top of the seat worktree's structural
+	// isolation (detached checkout + push disabled). Default false leaves stock
+	// polecat behaviour unchanged. See internal/seat.
+	Restricted bool
+
+	// SettingsPath is the curated Claude settings.json passed via --settings when
+	// Restricted is true (typically seat.Seat.SettingsPath).
+	SettingsPath string
 }
 
 // SessionInfo contains information about a running polecat session.
@@ -450,6 +462,12 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		if err != nil {
 			return fmt.Errorf("building startup command: %w", err)
 		}
+	}
+	// Read-only audit seat: strip --dangerously-skip-permissions and point Claude
+	// at the curated allow/deny settings.json. This is defense-in-depth; the
+	// load-bearing isolation is the seat worktree itself (detached + push off).
+	if opts.Restricted {
+		command = seat.RestrictClaudeCommand(command, opts.SettingsPath)
 	}
 	// Compute environment vars BEFORE creating the session so they can be
 	// passed to tmux via -e flags. Setting env via SetEnvironment after the

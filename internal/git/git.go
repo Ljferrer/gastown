@@ -985,14 +985,61 @@ const noPushSentinel = "DISABLED://audit-seat-read-only"
 // detached checkout alone does not stop `git push origin <sha>:<ref>`, so the
 // push URL must be neutralised as well.
 func (g *Git) DisablePush(remote string) error {
-	// Enabling extensions.worktreeConfig is repo-wide but backward compatible:
-	// existing shared config keys keep applying to all worktrees; only keys
-	// written with --worktree become per-worktree. Idempotent.
-	if _, err := g.run("config", "extensions.worktreeConfig", "true"); err != nil {
-		return fmt.Errorf("enabling worktree config: %w", err)
+	// Enabling extensions.worktreeConfig requires the worktreeConfig migration
+	// first: on a bare repo the COMMON config carries core.bare=true at
+	// repositoryformatversion=0, and flipping the extension on without migrating
+	// makes git mis-apply core.bare to EVERY linked worktree (worker polecats,
+	// refinery, deacon all break with "must be run in a work tree"). Run the
+	// migration against the shared/common repo dir before touching this seat.
+	if err := g.migrateWorktreeConfig(); err != nil {
+		return fmt.Errorf("migrating worktree config: %w", err)
 	}
 	if _, err := g.run("config", "--worktree", fmt.Sprintf("remote.%s.pushurl", remote), noPushSentinel); err != nil {
 		return fmt.Errorf("setting sentinel push URL for %s: %w", remote, err)
+	}
+	return nil
+}
+
+// migrateWorktreeConfig performs git's documented extensions.worktreeConfig
+// migration on the SHARED/common repository directory (never the caller's
+// worktree handle), then enables the extension. It is idempotent and safe to
+// run on repositories that are already migrated or were never bare.
+//
+// The order is load-bearing: extensions are only honored at
+// repositoryformatversion>=1, and `git config --worktree` only works once the
+// extension is enabled. So we bump the version, enable the extension, and only
+// then relocate core.bare from the common config into the main worktree's
+// config.worktree — leaving it in the common config while the extension is on
+// is precisely the corruption this guards against.
+func (g *Git) migrateWorktreeConfig() error {
+	commonDir, err := g.run("rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("resolving git common dir: %w", err)
+	}
+	// Operate directly on the shared repo, not via this (seat) worktree.
+	common := NewGitWithDir(commonDir, "")
+	commonConfig := filepath.Join(commonDir, "config")
+
+	// 1. Bump repositoryformatversion so extensions are honored (idempotent).
+	if _, err := common.run("config", "core.repositoryformatversion", "1"); err != nil {
+		return fmt.Errorf("setting repositoryformatversion: %w", err)
+	}
+	// 2. Enable the extension on the common config (idempotent).
+	if _, err := common.run("config", "extensions.worktreeConfig", "true"); err != nil {
+		return fmt.Errorf("enabling worktree config: %w", err)
+	}
+	// 3. If core.bare=true lingers in the COMMON config, relocate it to the main
+	//    worktree's config.worktree so it stops applying to every worktree. Read
+	//    the common config file specifically (not the merged view) so this is a
+	//    no-op once already migrated.
+	bare, err := common.run("config", "--file", commonConfig, "--get", "core.bare")
+	if err == nil && strings.TrimSpace(bare) == "true" {
+		if _, err := common.run("config", "--worktree", "core.bare", "true"); err != nil {
+			return fmt.Errorf("pinning core.bare to main worktree: %w", err)
+		}
+		if _, err := common.run("config", "--file", commonConfig, "--unset", "core.bare"); err != nil {
+			return fmt.Errorf("clearing core.bare from common config: %w", err)
+		}
 	}
 	return nil
 }

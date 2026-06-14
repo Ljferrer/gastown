@@ -964,6 +964,47 @@ func (g *Git) ClearPushURL(remote string) error {
 	return nil
 }
 
+// noPushSentinel is an intentionally invalid push URL. Git treats it as an
+// unsupported transport, so any `git push` to the affected remote fails fast
+// instead of contacting a real remote. Used to make audit "seat" worktrees
+// physically unable to advance refs (see DisablePush).
+const noPushSentinel = "DISABLED://audit-seat-read-only"
+
+// DisablePush makes `git push` to the given remote physically fail for THIS
+// worktree only, without affecting sibling worktrees that share the same bare
+// repository's object store and config.
+//
+// Linked worktrees share $GIT_COMMON_DIR/config, so a plain
+// `git config remote.<remote>.pushurl ...` would clobber every worktree that
+// shares the bare repo — disabling push for live worker polecats too. To scope
+// the change to a single worktree we enable the worktree-config extension and
+// write the sentinel push URL with `--worktree`, which lands in this worktree's
+// $GIT_DIR/config.worktree and is invisible to siblings.
+//
+// This is the load-bearing structural isolation for read-only audit seats: a
+// detached checkout alone does not stop `git push origin <sha>:<ref>`, so the
+// push URL must be neutralised as well.
+func (g *Git) DisablePush(remote string) error {
+	// Enabling extensions.worktreeConfig is repo-wide but backward compatible:
+	// existing shared config keys keep applying to all worktrees; only keys
+	// written with --worktree become per-worktree. Idempotent.
+	if _, err := g.run("config", "extensions.worktreeConfig", "true"); err != nil {
+		return fmt.Errorf("enabling worktree config: %w", err)
+	}
+	if _, err := g.run("config", "--worktree", fmt.Sprintf("remote.%s.pushurl", remote), noPushSentinel); err != nil {
+		return fmt.Errorf("setting sentinel push URL for %s: %w", remote, err)
+	}
+	return nil
+}
+
+// DiffThreeDot returns the unified patch between the merge-base of target and
+// head and head itself (`git diff <target>...<head>`). This is the exact diff a
+// merge of head onto target would introduce, read straight from the local
+// object store — no remote access required.
+func (g *Git) DiffThreeDot(target, head string) (string, error) {
+	return g.run("diff", target+"..."+head)
+}
+
 // GetPushURL returns the effective push URL for a remote.
 // Note: git returns the fetch URL when no custom push URL is configured, so this
 // never returns empty for a valid remote. Compare with RemoteURL to detect custom push URLs.

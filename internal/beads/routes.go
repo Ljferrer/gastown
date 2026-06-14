@@ -527,8 +527,18 @@ func ValidateRigPrefix(townRoot, rigName, beadID string) error {
 		return nil // Can't determine prefix — not an error
 	}
 	if actualPrefix != expectedPrefix {
-		return fmt.Errorf("bead %s has prefix %q but rig %q expects prefix %q — bead may have landed in wrong database",
-			beadID, actualPrefix, rigName, expectedPrefix)
+		// The minted prefix comes from the rig database's stored issue_prefix,
+		// while expectedPrefix is the configured short prefix (routes.jsonl /
+		// config.yaml). A mismatch means the bead either landed in the wrong
+		// database or the rig DB's issue_prefix has drifted from the configured
+		// short prefix (e.g. it still mints the full rig name). Point the
+		// operator at the only sanctioned repair (CLAUDE.md guardrail #2):
+		// bd rename-prefix consolidates IDs and rewrites the stored issue_prefix.
+		return fmt.Errorf("bead %s has prefix %q but rig %q expects prefix %q — "+
+			"the rig database's stored issue_prefix has likely drifted from the configured short prefix, "+
+			"so the bead may have landed in the wrong database. "+
+			"Repair from inside the rig: bd rename-prefix %s --repair && bd dolt commit (then verify 'bd config list | grep issue_prefix')",
+			beadID, actualPrefix, rigName, expectedPrefix, expectedPrefix)
 	}
 	return nil
 }

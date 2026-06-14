@@ -728,3 +728,37 @@ func TestValidateRigPrefix(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateRigPrefixMismatchIsActionable verifies that a prefix mismatch
+// error names the configured short prefix and the sanctioned repair command
+// (lgt-xp7). The original incident logged a vague "may not find this MR"
+// warning; operators need the bd rename-prefix --repair remediation inline.
+func TestValidateRigPrefixMismatchIsActionable(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Mirror the lgt-xp7 incident: rig configured with short prefix "lgt" but
+	// the minted MR bead carries the long full-rig-name prefix.
+	routesContent := `{"prefix": "lgt-", "path": "LokustGasTown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ValidateRigPrefix(tmpDir, "LokustGasTown", "LokustGasTown-wisp-8i4")
+	if err == nil {
+		t.Fatal("expected mismatch error for long-prefix bead on lgt rig, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"LokustGasTown-wisp-8i4",        // the offending bead ID
+		`"lgt"`,                         // the expected short prefix, quoted
+		"bd rename-prefix lgt --repair", // the sanctioned remediation
+		"issue_prefix",                  // names the drifted DB field
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("mismatch error missing %q\ngot: %s", want, msg)
+		}
+	}
+}

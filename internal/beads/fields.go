@@ -619,6 +619,32 @@ type MRFields struct {
 	// dissenting round (when AuditFixSentRound < AuditRound), never re-sent while
 	// the panel waits for the worker's fix.
 	AuditFixSentRound int
+
+	// Nun audit-gate bounds/backpressure/escalation state (lgt-c37). These honor
+	// the gate's hard round limit, soft wall-clock deadline, seat-exhaustion
+	// parking, and spawn/crash retries — all debounced via the bead so the
+	// behavior survives a Refinery restart.
+
+	// AuditDissentRounds counts consecutive genuine-dissent rounds (a round that
+	// ended on a real request_changes). It advances once per dissenting round,
+	// in lockstep with the aggregated FIX_NEEDED; infra faults never advance it.
+	// When it reaches round_limit the MR is hard-blocked (audit-blocked label).
+	AuditDissentRounds int
+	// AuditDeadlineNotifiedRound is the audit_round whose soft wall-clock deadline
+	// has already triggered a (non-blocking) slowness notification to the Mayor.
+	// Debounces the soft deadline to one notify per round.
+	AuditDeadlineNotifiedRound int
+	// AuditSpawnAttempts counts consecutive failed fresh-panel spawn attempts.
+	// After the bounded retries it parks + escalates; resets to 0 once a panel
+	// spawns cleanly.
+	AuditSpawnAttempts int
+	// AuditParkEscalated debounces the seat/roster-exhaustion park escalation to
+	// the Mayor: set true on the first park, cleared once a panel arms.
+	AuditParkEscalated bool
+	// AuditRespawnedRound is the audit_round in which a crashed (dead-session,
+	// no-verdict) Nun was already respawned once. Debounces the mid-audit-crash
+	// respawn to one per round; a second crash in the same round escalates.
+	AuditRespawnedRound int
 }
 
 // ParseMRFields extracts structured merge-request fields from an issue's description.
@@ -727,6 +753,29 @@ func ParseMRFields(issue *Issue) *MRFields {
 				fields.AuditFixSentRound = n
 				hasFields = true
 			}
+		case "audit_dissent_rounds", "audit-dissent-rounds", "auditdissentrounds":
+			if n, err := parseIntField(value); err == nil {
+				fields.AuditDissentRounds = n
+				hasFields = true
+			}
+		case "audit_deadline_notified_round", "audit-deadline-notified-round", "auditdeadlinenotifiedround":
+			if n, err := parseIntField(value); err == nil {
+				fields.AuditDeadlineNotifiedRound = n
+				hasFields = true
+			}
+		case "audit_spawn_attempts", "audit-spawn-attempts", "auditspawnattempts":
+			if n, err := parseIntField(value); err == nil {
+				fields.AuditSpawnAttempts = n
+				hasFields = true
+			}
+		case "audit_park_escalated", "audit-park-escalated", "auditparkescalated":
+			fields.AuditParkEscalated = strings.ToLower(value) == "true"
+			hasFields = true
+		case "audit_respawned_round", "audit-respawned-round", "auditrespawnedround":
+			if n, err := parseIntField(value); err == nil {
+				fields.AuditRespawnedRound = n
+				hasFields = true
+			}
 		}
 	}
 
@@ -820,6 +869,21 @@ func FormatMRFields(fields *MRFields) string {
 	}
 	if fields.AuditFixSentRound > 0 {
 		lines = append(lines, fmt.Sprintf("audit_fix_sent_round: %d", fields.AuditFixSentRound))
+	}
+	if fields.AuditDissentRounds > 0 {
+		lines = append(lines, fmt.Sprintf("audit_dissent_rounds: %d", fields.AuditDissentRounds))
+	}
+	if fields.AuditDeadlineNotifiedRound > 0 {
+		lines = append(lines, fmt.Sprintf("audit_deadline_notified_round: %d", fields.AuditDeadlineNotifiedRound))
+	}
+	if fields.AuditSpawnAttempts > 0 {
+		lines = append(lines, fmt.Sprintf("audit_spawn_attempts: %d", fields.AuditSpawnAttempts))
+	}
+	if fields.AuditParkEscalated {
+		lines = append(lines, "audit_park_escalated: true")
+	}
+	if fields.AuditRespawnedRound > 0 {
+		lines = append(lines, fmt.Sprintf("audit_respawned_round: %d", fields.AuditRespawnedRound))
 	}
 
 	return strings.Join(lines, "\n")

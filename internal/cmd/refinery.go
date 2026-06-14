@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/seatspawn"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -697,6 +698,13 @@ func runRefineryReady(cmd *cobra.Command, args []string) error {
 
 	// Create engineer for the rig (it has beads access for status checking)
 	eng := refinery.NewEngineer(r)
+
+	// Wire the concrete read-only Nun seat spawner into the live merge path. The
+	// Nun audit gate runs as a side effect of ListReadyMRs (lgt-k4x): with a
+	// spawner installed, an audit-enabled rig actually launches Nuns instead of
+	// parking every MR forever on a stamped-but-unspawned panel. Off-by-default
+	// audit config means this is inert until a Mayor opts the rig in.
+	eng.SetSeatSpawner(seatspawn.New(r))
 
 	if refineryReadyAll {
 		return runRefineryReadyAll(eng, rigName)

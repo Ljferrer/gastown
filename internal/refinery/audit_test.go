@@ -143,6 +143,93 @@ func TestLoadConfig_AuditOptIn(t *testing.T) {
 	}
 }
 
+func TestDefaultAuditConfig_CovenSize(t *testing.T) {
+	if c := DefaultAuditConfig(); c.CovenSize != 3 {
+		t.Errorf("coven_size default = %d, want 3", c.CovenSize)
+	}
+}
+
+func TestAuditConfigRaw_Apply_CovenSize(t *testing.T) {
+	cfg := DefaultAuditConfig()
+	coven := 5
+	raw := &auditConfigRaw{CovenSize: &coven}
+	raw.apply(cfg)
+	if cfg.CovenSize != 5 {
+		t.Errorf("CovenSize = %d, want 5", cfg.CovenSize)
+	}
+	if cfg.PanelSize != 1 {
+		t.Errorf("PanelSize = %d, want default 1 (untouched)", cfg.PanelSize)
+	}
+}
+
+// --- panelParams: coven label scales seats + deepens ---
+
+func enginePanel(panel, coven int) *Engineer {
+	e := &Engineer{}
+	e.config = &MergeQueueConfig{Audit: &AuditConfig{
+		Enabled: true, PanelSize: panel, CovenSize: coven,
+	}}
+	return e
+}
+
+func TestPanelParams_DefaultIsPanelNeighbors(t *testing.T) {
+	size, depth := enginePanel(1, 3).panelParams([]string{"gt:merge-request"})
+	if size != 1 || depth != auditDepthNeighbors {
+		t.Errorf("default panel = (%d,%q), want (1,neighbors)", size, depth)
+	}
+}
+
+func TestPanelParams_CovenLabelScalesAndDeepens(t *testing.T) {
+	size, depth := enginePanel(1, 3).panelParams([]string{"gt:merge-request", auditLabelCoven})
+	if size != 3 || depth != auditDepthDeep {
+		t.Errorf("coven panel = (%d,%q), want (3,deep)", size, depth)
+	}
+}
+
+// --- Flavor assignment: distinct lenses, stable by position ---
+
+func TestAssignFlavors_SingleSeatIsGeneral(t *testing.T) {
+	got := assignFlavors(1)
+	if len(got) != 1 || got[0] != flavorGeneral {
+		t.Errorf("assignFlavors(1) = %v, want [general]", got)
+	}
+}
+
+func TestAssignFlavors_CovenIsDistinct(t *testing.T) {
+	got := assignFlavors(3)
+	want := []string{"correctness", "security", "plan-faithfulness"}
+	if len(got) != 3 {
+		t.Fatalf("assignFlavors(3) = %v, want 3 lenses", got)
+	}
+	seen := map[string]bool{}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("flavor[%d] = %q, want %q", i, got[i], want[i])
+		}
+		if seen[got[i]] {
+			t.Errorf("flavor %q repeated — coven must search divergent angles", got[i])
+		}
+		seen[got[i]] = true
+	}
+}
+
+func TestAssignFlavors_StableByPosition(t *testing.T) {
+	// Each Nun keeps her flavor across rounds: seat i always maps to the same lens.
+	a, b := assignFlavors(3), assignFlavors(3)
+	for i := range a {
+		if a[i] != b[i] {
+			t.Errorf("flavor for seat %d not stable: %q vs %q", i, a[i], b[i])
+		}
+	}
+}
+
+func TestAssignFlavors_OverflowCyclesRoster(t *testing.T) {
+	got := assignFlavors(4)
+	if got[3] != NunFlavors[0] {
+		t.Errorf("flavor[3] = %q, want roster wrap %q", got[3], NunFlavors[0])
+	}
+}
+
 // --- Verdict labels ---
 
 func TestVerdictLabels_RoundTrip(t *testing.T) {

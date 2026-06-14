@@ -119,6 +119,31 @@ func claudeProjectDirFor(workDir string) (string, error) {
 	return filepath.Join(home, claudeProjectsDir, hash), nil
 }
 
+// LatestTranscriptModTime returns the modification time of the most recently
+// modified Claude Code transcript (.jsonl) for the given working directory.
+// It locates the project directory using the same path hashing Claude Code
+// uses (see claudeProjectDirFor) and reports the newest .jsonl mtime found.
+//
+// The bool result is false when the project directory cannot be read or holds
+// no transcript. This is a liveness signal for detached agent sessions whose
+// tmux session_activity timestamp does not advance past creation time, which
+// otherwise causes busy polecats to be mislabeled 'stalled' (lgt-s94).
+func LatestTranscriptModTime(workDir string) (time.Time, bool) {
+	projectDir, err := claudeProjectDirFor(workDir)
+	if err != nil {
+		return time.Time{}, false
+	}
+	path, ok := newestJSONLIn(projectDir, time.Time{})
+	if !ok {
+		return time.Time{}, false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
+}
+
 // waitForNewestJSONL polls projectDir until a qualifying .jsonl file appears.
 // "Qualifying" means mod time >= since (or any file if since is zero).
 // Returns the path of the most recently modified qualifying file.

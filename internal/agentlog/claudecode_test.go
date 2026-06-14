@@ -4,7 +4,57 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestLatestTranscriptModTime(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := "/work/myrig"
+	projectDir := filepath.Join(home, claudeProjectsDir, "-work-myrig")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// No transcript yet → not ok.
+	if _, ok := LatestTranscriptModTime(workDir); ok {
+		t.Fatal("expected ok=false when no transcript exists")
+	}
+
+	// Two transcripts with distinct mtimes; the newest should win.
+	older := filepath.Join(projectDir, "aaa.jsonl")
+	newer := filepath.Join(projectDir, "bbb.jsonl")
+	for _, p := range []string{older, newer} {
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Unix(1_700_000_000, 0)
+	newTime := time.Unix(1_700_003_600, 0)
+	if err := os.Chtimes(older, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newer, newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := LatestTranscriptModTime(workDir)
+	if !ok {
+		t.Fatal("expected ok=true when transcript exists")
+	}
+	if got.Unix() != newTime.Unix() {
+		t.Errorf("got mtime %v, want %v (newest)", got, newTime)
+	}
+}
+
+func TestLatestTranscriptModTime_NoProjectDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if _, ok := LatestTranscriptModTime("/work/missing"); ok {
+		t.Fatal("expected ok=false when project dir does not exist")
+	}
+}
 
 func TestClaudeProjectDirFor(t *testing.T) {
 	// The project hash replaces '/' with '-', so the leading slash becomes '-'.

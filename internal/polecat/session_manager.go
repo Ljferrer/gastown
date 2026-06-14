@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -752,6 +753,14 @@ func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 		if _, err := fmt.Sscanf(tmuxInfo.Activity, "%d", &activityUnix); err == nil && activityUnix > 0 {
 			info.LastActivity = time.Unix(activityUnix, 0)
 		}
+	}
+
+	// tmux's session_activity does not advance for a detached but live agent
+	// session, so LastActivity would stay pinned at session-creation time and
+	// busy polecats get mislabeled 'stalled' (lgt-s94). Source liveness from the
+	// Claude transcript mtime as well and report whichever is most recent.
+	if mt, ok := agentlog.LatestTranscriptModTime(m.clonePath(polecat)); ok && mt.After(info.LastActivity) {
+		info.LastActivity = mt
 	}
 
 	return info, nil

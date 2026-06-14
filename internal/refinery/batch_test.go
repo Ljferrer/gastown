@@ -862,6 +862,53 @@ func TestProcessBatch_SingleMR_BranchNotFound(t *testing.T) {
 	}
 }
 
+// TestProcessBatch_AuditEnabled_DoesNotBatchMerge is the lgt-ce2 regression: with
+// the Nun audit gate enabled, a multi-MR batch must NOT fast-forward un-audited
+// changes onto the target. The batch happy/good-subset paths (fastForwardBatch)
+// never call auditGate — only the single-MR path does — so the fix routes audited
+// queues through the gated single-MR path one at a time (approved SHA == landed
+// SHA). Here no panel can approve (no seat spawner / no verdicts), so the gate is
+// fail-closed and nothing merges. Contrast TestProcessBatch_MultipleMRs_AllPass,
+// which merges all three with the gate disabled.
+func TestProcessBatch_AuditEnabled_DoesNotBatchMerge(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	createFeatureBranch(t, workDir, "feature-a", "a.txt", "hello a\n")
+	createFeatureBranch(t, workDir, "feature-b", "b.txt", "hello b\n")
+	createFeatureBranch(t, workDir, "feature-c", "c.txt", "hello c\n")
+
+	e := newTestEngineer(t, workDir, g)
+	e.config.Audit.Enabled = true // opt into the Nun audit gate
+
+	batch := []*MRInfo{
+		makeMR("mr-a", "feature-a", "main"),
+		makeMR("mr-b", "feature-b", "main"),
+		makeMR("mr-c", "feature-c", "main"),
+	}
+
+	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
+
+	// Fail-closed: an audited, un-approved MR is parked, never merged.
+	if len(result.Merged) != 0 {
+		t.Errorf("audit enabled: expected 0 merged (gate parks un-approved MRs), got %d", len(result.Merged))
+	}
+
+	// Must take the gated no-batch route, not the fastForwardBatch path.
+	log := e.output.(*bytes.Buffer).String()
+	if !strings.Contains(log, "not batching") {
+		t.Errorf("expected no-batch audit routing in log, got: %s", log)
+	}
+
+	// Nothing must have landed on the target branch.
+	run(t, workDir, "git", "checkout", "main")
+	for _, f := range []string{"a.txt", "b.txt", "c.txt"} {
+		if _, err := os.Stat(filepath.Join(workDir, f)); err == nil {
+			t.Errorf("file %s landed on main despite pending audit gate (fail-open)", f)
+		}
+	}
+}
+
 // --- Helpers ---
 
 func stackedIDs(mrs []*MRInfo) []string {

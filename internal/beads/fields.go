@@ -645,6 +645,25 @@ type MRFields struct {
 	// no-verdict) Nun was already respawned once. Debounces the mid-audit-crash
 	// respawn to one per round; a second crash in the same round escalates.
 	AuditRespawnedRound int
+
+	// Trusted operator de-escalation/override fields. These carry actor
+	// provenance and are stamped ONLY by the role-authenticated `gt audit`
+	// commands (witness/Mayor) — never by a raw label, because bead labels carry
+	// no actor identity. The Refinery honors them as trusted because their only
+	// writer verified the caller's role before stamping.
+
+	// AuditSolo, when set, de-escalates the panel to a single Nun (unanimity
+	// threshold 1) regardless of the audit:coven label. The value is the actor
+	// that de-escalated (gt audit solo).
+	AuditSolo   string // actor that de-escalated to a solo review
+	AuditSoloAt string // ISO 8601 timestamp of the de-escalation
+
+	// AuditOverride, when set, force-approves an audit-blocked MR despite
+	// unresolved dissent — the required escape valve so a fail-closed gate cannot
+	// deadlock a rig. The value is the actor that overrode (gt audit override);
+	// the action is also recorded as a wisp for the audit trail.
+	AuditOverride   string // actor that force-approved past the audit gate
+	AuditOverrideAt string // ISO 8601 timestamp of the override
 }
 
 // ParseMRFields extracts structured merge-request fields from an issue's description.
@@ -776,6 +795,18 @@ func ParseMRFields(issue *Issue) *MRFields {
 				fields.AuditRespawnedRound = n
 				hasFields = true
 			}
+		case "audit_solo", "audit-solo", "auditsolo":
+			fields.AuditSolo = value
+			hasFields = true
+		case "audit_solo_at", "audit-solo-at", "auditsoloat":
+			fields.AuditSoloAt = value
+			hasFields = true
+		case "audit_override", "audit-override", "auditoverride":
+			fields.AuditOverride = value
+			hasFields = true
+		case "audit_override_at", "audit-override-at", "auditoverrideat":
+			fields.AuditOverrideAt = value
+			hasFields = true
 		}
 	}
 
@@ -885,6 +916,18 @@ func FormatMRFields(fields *MRFields) string {
 	if fields.AuditRespawnedRound > 0 {
 		lines = append(lines, fmt.Sprintf("audit_respawned_round: %d", fields.AuditRespawnedRound))
 	}
+	if fields.AuditSolo != "" {
+		lines = append(lines, "audit_solo: "+fields.AuditSolo)
+	}
+	if fields.AuditSoloAt != "" {
+		lines = append(lines, "audit_solo_at: "+fields.AuditSoloAt)
+	}
+	if fields.AuditOverride != "" {
+		lines = append(lines, "audit_override: "+fields.AuditOverride)
+	}
+	if fields.AuditOverrideAt != "" {
+		lines = append(lines, "audit_override_at: "+fields.AuditOverrideAt)
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -961,6 +1004,18 @@ func SetMRFields(issue *Issue, fields *MRFields) string {
 		"audit_fix_sent_round": true,
 		"audit-fix-sent-round": true,
 		"auditfixsentround":    true,
+		"audit_solo":           true,
+		"audit-solo":           true,
+		"auditsolo":            true,
+		"audit_solo_at":        true,
+		"audit-solo-at":        true,
+		"auditsoloat":          true,
+		"audit_override":       true,
+		"audit-override":       true,
+		"auditoverride":        true,
+		"audit_override_at":    true,
+		"audit-override-at":    true,
+		"auditoverrideat":      true,
 	}
 
 	// Collect non-MR lines from existing description

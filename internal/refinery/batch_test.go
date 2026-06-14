@@ -59,6 +59,24 @@ func createFeatureBranch(t *testing.T, workDir, branchName, filename, content st
 	run(t, workDir, "git", "checkout", "main")
 }
 
+// createRemoteOnlyBranch creates a branch, pushes it to origin so the
+// remote-tracking ref (origin/<branchName>) exists, then deletes the local ref.
+// This reproduces a merge-queue branch as the refinery worktree actually sees it:
+// present only as origin/<branch>, with no local ref (lgt-6g4). After this,
+// `git rev-parse <branchName>` fails while `git rev-parse origin/<branchName>`
+// resolves to the pushed commit.
+func createRemoteOnlyBranch(t *testing.T, workDir, branchName, filename, content string) {
+	t.Helper()
+	run(t, workDir, "git", "checkout", "-b", branchName, "main")
+	writeFile(t, workDir, filename, content)
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", fmt.Sprintf("feat: add %s", filename))
+	run(t, workDir, "git", "push", "origin", branchName)
+	run(t, workDir, "git", "checkout", "main")
+	// Drop the local ref so only origin/<branchName> remains.
+	run(t, workDir, "git", "branch", "-D", branchName)
+}
+
 // createConflictingBranch creates a branch that modifies the same file as another.
 func createConflictingBranch(t *testing.T, workDir, branchName, filename, content string) {
 	t.Helper()

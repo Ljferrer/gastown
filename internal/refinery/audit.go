@@ -709,6 +709,19 @@ func filterVerdictsBySeat(verdicts []*beads.Issue, seat string) []*beads.Issue {
 	return out
 }
 
+// resolveMRHead resolves the tip commit of an MR's branch. The merge-queue branch
+// lives on the remote and, in the refinery worktree, is typically present only as
+// a remote-tracking ref (origin/<branch>) — the local ref does not exist — so it is
+// resolved against origin/<branch> first, falling back to the bare name for the
+// local-branch case. Resolving the bare name alone fails closed with "unknown
+// revision" and parks the merge queue on every MR in an audit-enabled rig (lgt-6g4).
+func (e *Engineer) resolveMRHead(branch string) (string, error) {
+	if head, err := e.git.Rev("origin/" + branch); err == nil {
+		return head, nil
+	}
+	return e.git.Rev(branch)
+}
+
 // auditGate enforces the Nun audit before an MR may merge. A zero ProcessResult
 // means the audit passed (or is disabled) and the merge may proceed; a result
 // with AuditPending=true means the MR must wait. It drives the refinery-mediated
@@ -760,7 +773,7 @@ func (e *Engineer) auditGate(mr *MRInfo, now time.Time) ProcessResult {
 		return ProcessResult{AuditPending: true}
 	}
 
-	head, err := e.git.Rev(mr.Branch)
+	head, err := e.resolveMRHead(mr.Branch)
 	if err != nil {
 		return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: resolving HEAD of %s: %v", mr.Branch, err)}
 	}

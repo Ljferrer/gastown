@@ -685,6 +685,32 @@ func runRefineryUnclaimed(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// newLiveEngineer builds an Engineer wired for the live merge path — the path
+// the refinery daemon drives via `gt refinery ready`. It does two things a bare
+// NewEngineer does not:
+//
+//  1. LoadConfig — reads the rig's merge_queue config so an opt-in
+//     merge_queue.audit.enabled actually takes effect. Without this every live
+//     engineer runs on DefaultMergeQueueConfig (Audit.Enabled=false), so the Nun
+//     audit gate silently never convenes and MRs merge unaudited (fail-open).
+//  2. SetSeatSpawner — installs the concrete read-only Nun seat spawner. The
+//     audit gate runs as a side effect of ListReadyMRs (lgt-k4x); with a spawner
+//     installed an audit-enabled rig actually launches Nuns instead of parking
+//     every MR forever on a stamped-but-unspawned panel.
+//
+// LoadConfig failures are non-fatal: a malformed config.json must never wedge the
+// merge queue, so we warn and fall back to defaults. Audit stays off-by-default,
+// so this is inert until a Mayor opts the rig in.
+func newLiveEngineer(r *rig.Rig) *refinery.Engineer {
+	eng := refinery.NewEngineer(r)
+	if err := eng.LoadConfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s failed to load merge_queue config (using defaults): %v\n",
+			style.Dim.Render("⚠"), err)
+	}
+	eng.SetSeatSpawner(seatspawn.New(r))
+	return eng
+}
+
 func runRefineryReady(cmd *cobra.Command, args []string) error {
 	rigName := ""
 	if len(args) > 0 {
@@ -696,15 +722,9 @@ func runRefineryReady(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Create engineer for the rig (it has beads access for status checking)
-	eng := refinery.NewEngineer(r)
-
-	// Wire the concrete read-only Nun seat spawner into the live merge path. The
-	// Nun audit gate runs as a side effect of ListReadyMRs (lgt-k4x): with a
-	// spawner installed, an audit-enabled rig actually launches Nuns instead of
-	// parking every MR forever on a stamped-but-unspawned panel. Off-by-default
-	// audit config means this is inert until a Mayor opts the rig in.
-	eng.SetSeatSpawner(seatspawn.New(r))
+	// Create engineer wired for the live merge path: LoadConfig (so an opt-in
+	// audit.enabled actually takes effect) + the concrete Nun seat spawner.
+	eng := newLiveEngineer(r)
 
 	if refineryReadyAll {
 		return runRefineryReadyAll(eng, rigName)

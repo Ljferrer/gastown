@@ -285,6 +285,14 @@ func (e *Engineer) SetSeatSpawner(s SeatSpawner) {
 	e.seatSpawner = s
 }
 
+// HasSeatSpawner reports whether a seat spawner is installed. Without one the
+// audit gate cannot launch Nuns (audit.go guards spawn on e.seatSpawner != nil),
+// so callers on the live merge path use this to verify the gate can actually
+// convene before relying on it.
+func (e *Engineer) HasSeatSpawner() bool {
+	return e.seatSpawner != nil
+}
+
 // auditEnabled reports whether the Nun audit gate is configured on and active.
 func (e *Engineer) auditEnabled() bool {
 	return e.config != nil && e.config.Audit != nil && e.config.Audit.Enabled

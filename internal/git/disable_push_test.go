@@ -102,6 +102,101 @@ func TestDisablePush_Idempotent(t *testing.T) {
 	}
 }
 
+// setupBareRepoWithWorktrees builds a production-style bare repo (a
+// `git clone --bare` of a seeded origin, so its COMMON config carries
+// core.bare=true at repositoryformatversion=0) and adds linked worktrees
+// directly off it. This is the layout DisablePush corrupted: enabling
+// extensions.worktreeConfig without migrating leaks core.bare onto every
+// worktree. The existing setupSharedRepoWithWorktrees uses a NORMAL clone
+// (core.bare=false), where the bug is invisible.
+func setupBareRepoWithWorktrees(t *testing.T) (bare, head string) {
+	t.Helper()
+	root := t.TempDir()
+
+	origin := filepath.Join(root, "origin.git")
+	gitMust(t, root, "init", "--bare", origin)
+
+	seed := filepath.Join(root, "seed")
+	gitMust(t, root, "clone", origin, seed)
+	gitMust(t, seed, "config", "user.email", "test@test.com")
+	gitMust(t, seed, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("# seed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitMust(t, seed, "add", ".")
+	gitMust(t, seed, "commit", "-m", "seed")
+	gitMust(t, seed, "push", "origin", "HEAD:refs/heads/main")
+
+	// The production .repo.git: a bare clone whose common config has
+	// core.bare=true and repositoryformatversion=0.
+	bare = filepath.Join(root, "repo.git")
+	gitMust(t, root, "clone", "--bare", origin, bare)
+	if v := gitMust(t, bare, "config", "core.bare"); v != "true" {
+		t.Fatalf("precondition: bare repo core.bare = %q, want true", v)
+	}
+	if v := gitMust(t, bare, "config", "core.repositoryformatversion"); v != "0" {
+		t.Fatalf("precondition: bare repo repositoryformatversion = %q, want 0", v)
+	}
+	head = gitMust(t, bare, "rev-parse", "refs/heads/main")
+	return bare, head
+}
+
+// TestDisablePush_BareRepoDoesNotCorruptSiblingWorktrees is the regression for
+// lgt-44m: on a bare repo, DisablePush on a seat worktree must not make
+// core.bare leak onto sibling worktrees. Fails on the un-migrated code (worker
+// worktree reports it is not inside a work tree); passes after the migration.
+func TestDisablePush_BareRepoDoesNotCorruptSiblingWorktrees(t *testing.T) {
+	bare, head := setupBareRepoWithWorktrees(t)
+
+	worker := filepath.Join(filepath.Dir(bare), "worker")
+	seat := filepath.Join(filepath.Dir(bare), "seat")
+
+	bareGit := NewGit(bare)
+	if err := bareGit.WorktreeAddDetached(worker, head); err != nil {
+		t.Fatalf("add worker worktree: %v", err)
+	}
+	if err := bareGit.WorktreeAddDetached(seat, head); err != nil {
+		t.Fatalf("add seat worktree: %v", err)
+	}
+
+	// Sanity: both worktrees are valid work trees before the seat is neutralised.
+	if got := gitMust(t, worker, "rev-parse", "--is-inside-work-tree"); got != "true" {
+		t.Fatalf("precondition: worker is-inside-work-tree = %q, want true", got)
+	}
+
+	if err := NewGit(seat).DisablePush("origin"); err != nil {
+		t.Fatalf("DisablePush: %v", err)
+	}
+
+	// (i) Every worktree must still be a work tree — the corruption made these
+	//     fail with "this operation must be run in a work tree".
+	for _, wt := range []string{worker, seat} {
+		if got := gitMust(t, wt, "rev-parse", "--is-inside-work-tree"); got != "true" {
+			t.Fatalf("worktree %s is-inside-work-tree = %q, want true (core.bare leaked)", wt, got)
+		}
+	}
+
+	// (ii) The common repo must have been migrated to version >= 1.
+	if v := gitMust(t, bare, "config", "core.repositoryformatversion"); v != "1" {
+		t.Fatalf("repositoryformatversion = %q, want 1 after migration", v)
+	}
+
+	// (iii) core.bare must no longer live in the COMMON config (read the file
+	//       directly, bypassing the config.worktree merge).
+	commonConfig := filepath.Join(bare, "config")
+	cmd := exec.Command("git", "config", "--file", commonConfig, "--get", "core.bare")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("core.bare still present in common config (=%q); it must move to config.worktree", strings.TrimSpace(string(out)))
+	}
+
+	// The seat must still be unable to advance refs.
+	cmd = exec.Command("git", "push", "origin", head+":refs/heads/seat-attack")
+	cmd.Dir = seat
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("seat push unexpectedly succeeded; output:\n%s", out)
+	}
+}
+
 func TestDiffThreeDot_ReadsFromSharedStore(t *testing.T) {
 	clone, _ := setupSharedRepoWithWorktrees(t)
 	target := gitMust(t, clone, "rev-parse", "HEAD")

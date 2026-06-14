@@ -212,6 +212,19 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 		return e.processSingleMR(ctx, batch[0], target)
 	}
 
+	// Nun audit gate: an audited MR must be reviewed against the EXACT SHA that
+	// lands. Batching merges a combined/stacked SHA that no panel ever approved,
+	// so when the gate is enabled we never batch — each MR is processed (and
+	// gated) on its own so the approved SHA == the merged SHA. Process just the
+	// head of the queue here; the refinery loop re-invokes ProcessBatch each
+	// cycle, draining the queue one gated MR at a time. This closes the multi-MR
+	// bypass where the fastForwardBatch happy/good-subset paths never called
+	// auditGate (lgt-ce2).
+	if e.auditEnabled() {
+		_, _ = fmt.Fprintf(e.output, "[Batch] Audit gate enabled — not batching; processing MRs one at a time so each merge is audited against the SHA that lands\n")
+		return e.processSingleMR(ctx, batch[0], target)
+	}
+
 	_, _ = fmt.Fprintf(e.output, "[Batch] Processing batch of %d MRs targeting %s\n", len(batch), target)
 
 	// Step 1: Build the stack

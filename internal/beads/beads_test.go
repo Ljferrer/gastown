@@ -1859,6 +1859,29 @@ func TestMRFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMRFieldsAuditRoundTrip verifies the Nun audit-gate panel state survives a
+// format→parse round-trip on the MR bead (panel persistence across restart).
+func TestMRFieldsAuditRoundTrip(t *testing.T) {
+	original := &MRFields{
+		Branch:        "polecat/Mary/lgt-xyz",
+		Target:        "main",
+		SourceIssue:   "lgt-xyz",
+		AuditSHA:      "abc123def456",
+		AuditRound:    2,
+		AuditDeadline: "2026-06-14T12:00:00Z",
+		AuditSeats:    "Mary,Teresa",
+	}
+
+	issue := &Issue{Description: FormatMRFields(original)}
+	parsed := ParseMRFields(issue)
+	if parsed == nil {
+		t.Fatal("round-trip parse returned nil")
+	}
+	if !reflect.DeepEqual(parsed, original) {
+		t.Errorf("audit round-trip mismatch:\ngot  %+v\nwant %+v", parsed, original)
+	}
+}
+
 // TestParseMRFieldsFromDesignDoc tests the example from the design doc.
 func TestParseMRFieldsFromDesignDoc(t *testing.T) {
 	// Example from docs/merge-queue-design.md

@@ -36,11 +36,20 @@ const (
 	VerdictApprove        = "approve"
 	VerdictRequestChanges = "request_changes"
 
-	verdictLabel       = "nun-verdict"
+	// VerdictLabel tags every Nun verdict bead/wisp. Exported so the read-only
+	// `gt audit status` surface can list and tally in-flight verdicts.
+	VerdictLabel = "nun-verdict"
+	verdictLabel = VerdictLabel
+
 	verdictLabelPrefix = "verdict:"
 
+	// AuditPendingLabel marks an MR whose panel is armed and awaiting verdicts.
+	// Exported for the read-only status surface; the internal alias is retained
+	// for existing call sites.
+	AuditPendingLabel = "audit-pending"
+
 	// auditLabelPending marks an MR whose panel is armed and awaiting verdicts.
-	auditLabelPending = "audit-pending"
+	auditLabelPending = AuditPendingLabel
 
 	// auditLabelCoven opts an MR into a coven audit: the panel scales to
 	// coven_size seats AND deepens to full agent-judgment impact tracing
@@ -642,6 +651,56 @@ func (e *Engineer) teardownAuditPanel(mrID string, f *beads.MRFields) {
 	_ = e.beads.Update(mrID, beads.UpdateOptions{RemoveLabels: []string{auditLabelPending}})
 }
 
+// soloShrinkPanel enforces a stamped de-escalation (gt audit solo) on an
+// already-armed panel: if more than one Nun is resident, it tears down every seat
+// after the first and truncates the persisted roster/flavors to that single
+// retained seat. It returns the retained seat name (or "" when no panel is armed
+// yet, in which case the fresh panel is armed at size 1 from the start).
+// Idempotent: a panel already at one seat is left untouched.
+func (e *Engineer) soloShrinkPanel(mrID string, f *beads.MRFields) (string, error) {
+	seats := parseSeats(f.AuditSeats)
+	if len(seats) == 0 {
+		return "", nil
+	}
+	retained := seats[0]
+	if len(seats) == 1 {
+		return retained, nil
+	}
+	if e.seatSpawner != nil {
+		for _, n := range seats[1:] {
+			_ = e.seatSpawner.TeardownSeat(n)
+		}
+	}
+	f.AuditSeats = retained
+	if flavors := parseSeats(f.AuditFlavors); len(flavors) > 0 {
+		f.AuditFlavors = flavors[0]
+	}
+	issue, err := e.beads.Show(mrID)
+	if err != nil {
+		return "", err
+	}
+	desc := beads.SetMRFields(issue, f)
+	if err := e.beads.Update(mrID, beads.UpdateOptions{Description: &desc}); err != nil {
+		return "", err
+	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Audit de-escalated to solo on MR %s by %s — retained seat %s, tore down %d seat(s)\n", mrID, f.AuditSolo, retained, len(seats)-1)
+	return retained, nil
+}
+
+// filterVerdictsBySeat returns only the verdict beads authored by the named seat.
+// Used under a solo de-escalation so the lone retained Nun's verdict is the only
+// one that gates, ignoring any verdict a now-torn-down seat left behind for the
+// SHA.
+func filterVerdictsBySeat(verdicts []*beads.Issue, seat string) []*beads.Issue {
+	out := make([]*beads.Issue, 0, len(verdicts))
+	for _, v := range verdicts {
+		if parseSeatLabel(v.Labels) == seat {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // auditGate enforces the Nun audit before an MR may merge. A zero ProcessResult
 // means the audit passed (or is disabled) and the merge may proceed; a result
 // with AuditPending=true means the MR must wait. It drives the refinery-mediated
@@ -660,21 +719,6 @@ func (e *Engineer) auditGate(mr *MRInfo, now time.Time) ProcessResult {
 		return ProcessResult{}
 	}
 
-	// Terminal hard-block: an MR that already hit the round limit (or exhausted
-	// spawn/crash retries) is parked forever, fail-closed. It never re-spawns,
-	// re-tallies or re-escalates — a human/Mayor must clear the audit-blocked
-	// label after intervening. This check precedes all panel work so a blocked MR
-	// is cheap to skip every cycle.
-	if blocked, err := e.beads.Show(mr.ID); err == nil && blocked != nil && beads.HasLabel(blocked, auditLabelBlocked) {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s is audit-blocked — parked pending human/Mayor intervention\n", mr.ID)
-		return ProcessResult{AuditPending: true}
-	}
-
-	head, err := e.git.Rev(mr.Branch)
-	if err != nil {
-		return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: resolving HEAD of %s: %v", mr.Branch, err)}
-	}
-
 	issue, err := e.beads.Show(mr.ID)
 	if err != nil {
 		return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: reading MR %s: %v", mr.ID, err)}
@@ -682,6 +726,35 @@ func (e *Engineer) auditGate(mr *MRInfo, now time.Time) ProcessResult {
 	f := beads.ParseMRFields(issue)
 	if f == nil {
 		f = &beads.MRFields{}
+	}
+
+	// Trusted operator override (gt audit override): a witness/Mayor force-approved
+	// this MR despite unresolved dissent. This is the escape valve that keeps a
+	// fail-closed gate from deadlocking a rig — so it is checked FIRST, ahead of
+	// even the terminal audit-blocked hard-block, since a round-limit deadlock is
+	// exactly the state an operator overrides. The field is honored only because
+	// the role-authenticated command stamped it (the action is also recorded as a
+	// wisp for the audit trail). Teardown any resident panel and let the merge
+	// proceed.
+	if f.AuditOverride != "" {
+		e.teardownAuditPanel(mr.ID, f)
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Audit OVERRIDE on MR %s by %s — force-approved past the gate, eligible to merge\n", mr.ID, f.AuditOverride)
+		return ProcessResult{}
+	}
+
+	// Terminal hard-block: an MR that already hit the round limit (or exhausted
+	// spawn/crash retries) is parked forever, fail-closed. It never re-spawns,
+	// re-tallies or re-escalates — a human/Mayor must clear the audit-blocked
+	// label (or stamp an override, handled above) after intervening. This check
+	// precedes all panel work so a blocked MR is cheap to skip every cycle.
+	if beads.HasLabel(issue, auditLabelBlocked) {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s is audit-blocked — parked pending human/Mayor intervention\n", mr.ID)
+		return ProcessResult{AuditPending: true}
+	}
+
+	head, err := e.git.Rev(mr.Branch)
+	if err != nil {
+		return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: resolving HEAD of %s: %v", mr.Branch, err)}
 	}
 
 	// The audit:coven label scales the panel to coven_size seats at depth=deep;
@@ -693,6 +766,22 @@ func (e *Engineer) auditGate(mr *MRInfo, now time.Time) ProcessResult {
 	verdicts, err := e.verdictWisps()
 	if err != nil {
 		return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: listing verdicts for %s: %v", mr.ID, err)}
+	}
+
+	// Trusted operator de-escalation (gt audit solo): a witness/Mayor reduced this
+	// MR to a single-Nun review. This wins over the free audit:coven label —
+	// scaling up needs no permission, but scaling down does. Force the unanimity
+	// threshold to 1; if a larger panel is already resident, shrink it to the
+	// first seat and tally only that seat's verdict so a single Nun truly gates.
+	if f.AuditSolo != "" {
+		size, depth = 1, auditDepthNeighbors
+		retained, err := e.soloShrinkPanel(mr.ID, f)
+		if err != nil {
+			return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: de-escalating %s to solo: %v", mr.ID, err)}
+		}
+		if retained != "" {
+			verdicts = filterVerdictsBySeat(verdicts, retained)
+		}
 	}
 
 	action, dissents := decideAuditAction(f.AuditSHA, head, verdicts, mr.ID, size)

@@ -27,6 +27,23 @@ git show {{audit_sha}}:<path>      # read any file at the audited SHA
 git log {{target}}..{{audit_sha}}  # the commits being merged
 ```
 
+## Your lens: {{flavor}}
+
+When the Refinery convenes a **coven** (more than one seat), it spins each seat
+up with a different lens so the panel searches divergent angles instead of N
+identical reads. Lead your review with **your** lens — but a fault outside it
+that would block the merge is still yours to raise (the gate is fail-closed).
+
+- **correctness** — does the change do what it intends? Logic, edge cases, error
+  handling, concurrency, resource lifetimes, contracts with callers.
+- **security** — what could an adversary do with this? Injection, authz/authn,
+  secrets, unsafe input, privilege, dependency and supply-chain risk.
+- **plan-faithfulness** — does the change match its stated intent? Use the plan
+  discovery below; if no plan is discoverable, judge against the issue's
+  description and acceptance criteria.
+- **general** — a single-Nun review with no narrowed angle: weigh correctness,
+  safety, and intent together.
+
 ## Plan faithfulness (best-effort, your judgment)
 
 Read the source issue ({{source_issue}}) and follow any plan it names (linked
@@ -45,7 +62,8 @@ complete review, not a failure.
 | audit_sha     | Branch HEAD at spawn time — the exact SHA you review   |
 | seat_name     | Your leased Nun roster name                            |
 | round         | 1-based panel round counter                            |
-| depth         | `neighbors` (default) or `deep`                        |"""
+| depth         | `neighbors` (default) or `deep` (coven)                |
+| flavor        | Your perspective lens; `general` for a single-Nun read |"""
 formula = "mol-nun-audit"
 version = 1
 
@@ -67,14 +85,17 @@ git show {{audit_sha}}:<path>
 Follow depth `{{depth}}`: `neighbors` = the diff plus the definitions/callers it
 directly references; `deep` = trace the impact wherever it leads.
 
-**2. Check plan faithfulness (best-effort):**
+**2. Apply your lens ({{flavor}}).** Lead with the angle assigned to your seat
+(see "Your lens" above); raise any blocking fault you find, in-lens or not.
+
+**3. Check plan faithfulness (best-effort):**
 ```bash
 bd show {{source_issue}}
 ```
 Follow any linked plan beads or committed plan files and check this slice against
 the relevant portion. No plan discoverable → audit code/diff only.
 
-**3. Form a verdict.** Ask: is this change correct, safe to merge onto
+**4. Form a verdict.** Ask: is this change correct, safe to merge onto
 {{target}}, and faithful to its stated intent? When in doubt, request changes —
 the gate is fail-closed and a human reviews escalations.
 
@@ -147,3 +168,7 @@ default = "1"
 [vars.depth]
 description = "Audit depth: neighbors (default) or deep"
 default = "neighbors"
+
+[vars.flavor]
+description = "Perspective lens for this seat (correctness/security/plan-faithfulness); general for a single-Nun read"
+default = "general"

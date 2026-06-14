@@ -278,6 +278,12 @@ type Engineer struct {
 	// nil when no spawn wiring is installed (audit panel state is still stamped
 	// on the bead, but no agent is launched). See audit.go.
 	seatSpawner SeatSpawner
+
+	// auditFixNotify dispatches the single aggregated FIX_NEEDED to the worker
+	// polecat for a dissenting audit round, reusing the event-driven channel (a
+	// gt nudge to the worker — no permanent Dolt commit). Injectable so the
+	// fix loop is unit-testable; defaults to defaultAuditFixNotify.
+	auditFixNotify func(mr *MRInfo, round int, findings string) error
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -293,7 +299,7 @@ func NewEngineer(r *rig.Rig) *Engineer {
 	}
 	beadsClient := beads.New(r.Path)
 
-	return &Engineer{
+	eng := &Engineer{
 		rig:     r,
 		beads:   beadsClient,
 		git:     git.NewGit(gitDir),
@@ -313,6 +319,25 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		mergeSlotMaxRetries:   10,
 		mergeSlotRetryBackoff: 500 * time.Millisecond,
 	}
+	eng.auditFixNotify = eng.defaultAuditFixNotify
+	return eng
+}
+
+// defaultAuditFixNotify nudges the worker polecat with the aggregated Nun-audit
+// findings for a dissenting round, reusing the event-driven FIX_NEEDED channel
+// (gt nudge — no permanent Dolt commit). The worker stays alive through the
+// merge cycle and fixes in-place, then pushes a single new SHA which re-arms the
+// resident panel. The Refinery is the only sender of FIX_NEEDED; Nuns never
+// message the worker directly.
+func (e *Engineer) defaultAuditFixNotify(mr *MRInfo, round int, findings string) error {
+	polecatName := strings.TrimPrefix(mr.Worker, "polecats/")
+	target := fmt.Sprintf("%s/%s", e.rig.Name, polecatName)
+	msg := fmt.Sprintf("FIX_NEEDED (audit round %d): branch=%s issue=%s — the Nun audit requested changes. Address every point below in-place, then resubmit with 'gt done':\n%s",
+		round, mr.Branch, mr.SourceIssue, findings)
+	cmd := exec.Command("gt", "nudge", target, msg)
+	util.SetDetachedProcessGroup(cmd)
+	cmd.Dir = e.workDir
+	return cmd.Run()
 }
 
 // SetOutput sets the output writer for user-facing messages.

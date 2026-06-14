@@ -613,6 +613,12 @@ type MRFields struct {
 	AuditDeadline string // ISO 8601 wall-clock deadline for the current round
 	AuditSeats    string // Comma-separated leased Nun roster names for this panel
 	AuditFlavors  string // Comma-separated perspective lenses, positionally parallel to AuditSeats
+	// AuditFixSentRound is the audit_round for which the Refinery already
+	// dispatched the single aggregated FIX_NEEDED to the worker. It makes the
+	// per-round notification idempotent: a FIX_NEEDED is sent exactly once per
+	// dissenting round (when AuditFixSentRound < AuditRound), never re-sent while
+	// the panel waits for the worker's fix.
+	AuditFixSentRound int
 }
 
 // ParseMRFields extracts structured merge-request fields from an issue's description.
@@ -716,6 +722,11 @@ func ParseMRFields(issue *Issue) *MRFields {
 		case "audit_flavors", "audit-flavors", "auditflavors":
 			fields.AuditFlavors = value
 			hasFields = true
+		case "audit_fix_sent_round", "audit-fix-sent-round", "auditfixsentround":
+			if n, err := parseIntField(value); err == nil {
+				fields.AuditFixSentRound = n
+				hasFields = true
+			}
 		}
 	}
 
@@ -807,6 +818,9 @@ func FormatMRFields(fields *MRFields) string {
 	if fields.AuditFlavors != "" {
 		lines = append(lines, "audit_flavors: "+fields.AuditFlavors)
 	}
+	if fields.AuditFixSentRound > 0 {
+		lines = append(lines, fmt.Sprintf("audit_fix_sent_round: %d", fields.AuditFixSentRound))
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -821,65 +835,68 @@ func SetMRFields(issue *Issue, fields *MRFields) string {
 
 	// Known MR field keys (lowercase)
 	mrKeys := map[string]bool{
-		"branch":            true,
-		"target":            true,
-		"source_issue":      true,
-		"source-issue":      true,
-		"sourceissue":       true,
-		"worker":            true,
-		"rig":               true,
-		"commit_sha":        true,
-		"commit-sha":        true,
-		"commitsha":         true,
-		"merge_commit":      true,
-		"merge-commit":      true,
-		"mergecommit":       true,
-		"close_reason":      true,
-		"close-reason":      true,
-		"closereason":       true,
-		"agent_bead":        true,
-		"agent-bead":        true,
-		"agentbead":         true,
-		"retry_count":       true,
-		"retry-count":       true,
-		"retrycount":        true,
-		"last_conflict_sha": true,
-		"last-conflict-sha": true,
-		"lastconflictsha":   true,
-		"conflict_task_id":  true,
-		"conflict-task-id":  true,
-		"conflicttaskid":    true,
-		"convoy_id":         true,
-		"convoy-id":         true,
-		"convoyid":          true,
-		"convoy":            true,
-		"convoy_created_at": true,
-		"convoy-created-at": true,
-		"convoycreatedat":   true,
-		"pre_verified":      true,
-		"pre-verified":      true,
-		"preverified":       true,
-		"pre_verified_at":   true,
-		"pre-verified-at":   true,
-		"preverifiedat":     true,
-		"pre_verified_base": true,
-		"pre-verified-base": true,
-		"preverifiedbase":   true,
-		"audit_sha":         true,
-		"audit-sha":         true,
-		"auditsha":          true,
-		"audit_round":       true,
-		"audit-round":       true,
-		"auditround":        true,
-		"audit_deadline":    true,
-		"audit-deadline":    true,
-		"auditdeadline":     true,
-		"audit_seats":       true,
-		"audit-seats":       true,
-		"auditseats":        true,
-		"audit_flavors":     true,
-		"audit-flavors":     true,
-		"auditflavors":      true,
+		"branch":               true,
+		"target":               true,
+		"source_issue":         true,
+		"source-issue":         true,
+		"sourceissue":          true,
+		"worker":               true,
+		"rig":                  true,
+		"commit_sha":           true,
+		"commit-sha":           true,
+		"commitsha":            true,
+		"merge_commit":         true,
+		"merge-commit":         true,
+		"mergecommit":          true,
+		"close_reason":         true,
+		"close-reason":         true,
+		"closereason":          true,
+		"agent_bead":           true,
+		"agent-bead":           true,
+		"agentbead":            true,
+		"retry_count":          true,
+		"retry-count":          true,
+		"retrycount":           true,
+		"last_conflict_sha":    true,
+		"last-conflict-sha":    true,
+		"lastconflictsha":      true,
+		"conflict_task_id":     true,
+		"conflict-task-id":     true,
+		"conflicttaskid":       true,
+		"convoy_id":            true,
+		"convoy-id":            true,
+		"convoyid":             true,
+		"convoy":               true,
+		"convoy_created_at":    true,
+		"convoy-created-at":    true,
+		"convoycreatedat":      true,
+		"pre_verified":         true,
+		"pre-verified":         true,
+		"preverified":          true,
+		"pre_verified_at":      true,
+		"pre-verified-at":      true,
+		"preverifiedat":        true,
+		"pre_verified_base":    true,
+		"pre-verified-base":    true,
+		"preverifiedbase":      true,
+		"audit_sha":            true,
+		"audit-sha":            true,
+		"auditsha":             true,
+		"audit_round":          true,
+		"audit-round":          true,
+		"auditround":           true,
+		"audit_deadline":       true,
+		"audit-deadline":       true,
+		"auditdeadline":        true,
+		"audit_seats":          true,
+		"audit-seats":          true,
+		"auditseats":           true,
+		"audit_flavors":        true,
+		"audit-flavors":        true,
+		"auditflavors":         true,
+		"audit_fix_sent_round": true,
+		"audit-fix-sent-round": true,
+		"auditfixsentround":    true,
 	}
 
 	// Collect non-MR lines from existing description

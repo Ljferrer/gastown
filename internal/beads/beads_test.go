@@ -1631,6 +1631,12 @@ func TestMRFieldsAuditRoundTrip(t *testing.T) {
 		AuditDeadline:     "2026-06-14T12:00:00Z",
 		AuditSeats:        "Mary,Teresa",
 		AuditFixSentRound: 1,
+		// Bounds/backpressure/escalation debounce state (lgt-c37).
+		AuditDissentRounds:         2,
+		AuditDeadlineNotifiedRound: 2,
+		AuditSpawnAttempts:         1,
+		AuditParkEscalated:         true,
+		AuditRespawnedRound:        2,
 	}
 
 	issue := &Issue{Description: FormatMRFields(original)}

@@ -257,6 +257,20 @@ type SeatSpawner interface {
 	TeardownSeat(name string) error
 }
 
+// SeatLivenessChecker is an OPTIONAL capability a SeatSpawner may implement so the
+// audit gate can detect a mid-audit Nun crash — a resident seat whose agent
+// session died before it could write a verdict. When the installed spawner does
+// not implement it (e.g. the nil-spawner tracer-bullet wiring), crash detection
+// is skipped and the soft wall-clock deadline remains the backstop for a silently
+// wedged audit. Kept separate from SeatSpawner so the concrete liveness probe can
+// land with the session-manager spawn wiring without widening the core interface.
+type SeatLivenessChecker interface {
+	// SeatAlive reports whether the named seat's agent session is still running.
+	// A non-nil error is treated by the gate as "assume alive" (fail-open — never
+	// tear down a Nun we cannot prove is dead).
+	SeatAlive(name string) (bool, error)
+}
+
 // SetSeatSpawner wires a concrete seat spawner into the Engineer.
 func (e *Engineer) SetSeatSpawner(s SeatSpawner) {
 	e.seatSpawner = s
@@ -331,6 +345,12 @@ func (e *Engineer) writeAuditState(mrID, sha string, round int, deadline string,
 	f.AuditDeadline = deadline
 	f.AuditSeats = formatSeats(seats)
 	f.AuditFlavors = formatSeats(flavors)
+	// A clean (re)arm clears the transient backpressure debounces: the panel is
+	// live at this SHA, so any prior spawn-failure streak or seat-exhaustion park
+	// is resolved. The consecutive-dissent counter (AuditDissentRounds) is left
+	// untouched — it must persist across re-arms to enforce the hard round limit.
+	f.AuditSpawnAttempts = 0
+	f.AuditParkEscalated = false
 	desc := beads.SetMRFields(issue, f)
 	return e.beads.Update(mrID, beads.UpdateOptions{Description: &desc})
 }
@@ -388,20 +408,31 @@ func (e *Engineer) armFreshPanel(mr *MRInfo, headSHA string, size int, depth str
 
 	flavors := assignFlavors(len(leased))
 
+	// Spawn every seat BEFORE persisting the armed panel. A spawn failure must
+	// leave no half-armed panel on the bead (audit_sha stays unset) so the next
+	// cycle cleanly re-enters arm-fresh and retries; seats already spawned this
+	// attempt are torn down so a partial attempt leaks no resident Nun. The error
+	// is tagged errSpawnFailed so auditGate can drive the bounded spawn-retry path
+	// (distinct from seat exhaustion and from generic bead/git faults).
+	if e.seatSpawner != nil {
+		var spawned []string
+		for i, name := range leased {
+			if err := e.seatSpawner.SpawnSeat(e.seatRequest(mr, headSHA, 1, name, depth, flavors[i])); err != nil {
+				for _, s := range spawned {
+					_ = e.seatSpawner.TeardownSeat(s)
+				}
+				return fmt.Errorf("spawning seat %s for MR %s: %w: %v", name, mr.ID, errSpawnFailed, err)
+			}
+			spawned = append(spawned, name)
+		}
+	}
+
 	deadline := now.Add(time.Duration(cfg.WallClockMin) * time.Minute).UTC().Format(time.RFC3339)
 	if err := e.writeAuditState(mr.ID, headSHA, 1, deadline, leased, flavors); err != nil {
 		return err
 	}
 	if err := e.beads.Update(mr.ID, beads.UpdateOptions{AddLabels: []string{auditLabelPending}}); err != nil {
 		return err
-	}
-
-	if e.seatSpawner != nil {
-		for i, name := range leased {
-			if err := e.seatSpawner.SpawnSeat(e.seatRequest(mr, headSHA, 1, name, depth, flavors[i])); err != nil {
-				return fmt.Errorf("spawning seat %s for MR %s: %w", name, mr.ID, err)
-			}
-		}
 	}
 	return nil
 }
@@ -566,29 +597,12 @@ func aggregateFindings(dissents []*beads.Issue) string {
 
 // fixNeededDue reports whether the single aggregated FIX_NEEDED for the current
 // dissenting round still needs to be sent. It is true exactly once per round:
-// after a send, markFixSent advances AuditFixSentRound to the round; a re-arm
-// (worker pushed a fix) increments AuditRound past it, re-enabling the next
-// round's send. This is the idempotency guard behind "exactly one FIX_NEEDED
-// per round, sent only by the Refinery".
+// after a send, recordDissentRound advances AuditFixSentRound to the round (in
+// lockstep with the dissent counter); a re-arm (worker pushed a fix) increments
+// AuditRound past it, re-enabling the next round's send. This is the idempotency
+// guard behind "exactly one FIX_NEEDED per round, sent only by the Refinery".
 func fixNeededDue(fixSentRound, round int) bool {
 	return fixSentRound < round
-}
-
-// markFixSent records that the aggregated FIX_NEEDED for the given round has
-// already been dispatched, so it is never re-sent while the panel waits for the
-// worker's fix.
-func (e *Engineer) markFixSent(mrID string, round int) error {
-	issue, err := e.beads.Show(mrID)
-	if err != nil {
-		return err
-	}
-	f := beads.ParseMRFields(issue)
-	if f == nil {
-		f = &beads.MRFields{}
-	}
-	f.AuditFixSentRound = round
-	desc := beads.SetMRFields(issue, f)
-	return e.beads.Update(mrID, beads.UpdateOptions{Description: &desc})
 }
 
 // verdictWisps lists candidate verdict beads. Default transport is wisp
@@ -646,6 +660,16 @@ func (e *Engineer) auditGate(mr *MRInfo, now time.Time) ProcessResult {
 		return ProcessResult{}
 	}
 
+	// Terminal hard-block: an MR that already hit the round limit (or exhausted
+	// spawn/crash retries) is parked forever, fail-closed. It never re-spawns,
+	// re-tallies or re-escalates — a human/Mayor must clear the audit-blocked
+	// label after intervening. This check precedes all panel work so a blocked MR
+	// is cheap to skip every cycle.
+	if blocked, err := e.beads.Show(mr.ID); err == nil && blocked != nil && beads.HasLabel(blocked, auditLabelBlocked) {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s is audit-blocked — parked pending human/Mayor intervention\n", mr.ID)
+		return ProcessResult{AuditPending: true}
+	}
+
 	head, err := e.git.Rev(mr.Branch)
 	if err != nil {
 		return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: resolving HEAD of %s: %v", mr.Branch, err)}
@@ -674,11 +698,18 @@ func (e *Engineer) auditGate(mr *MRInfo, now time.Time) ProcessResult {
 	action, dissents := decideAuditAction(f.AuditSHA, head, verdicts, mr.ID, size)
 	switch action {
 	case actionArmFresh:
-		if err := e.armFreshPanel(mr, head, size, depth, now); err != nil {
+		err := e.armFreshPanel(mr, head, size, depth, now)
+		switch {
+		case err == nil:
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Audit panel armed for MR %s at %s (round 1, %d seat(s), depth=%s) — parking until verdicts land\n", mr.ID, shortSHA(head), size, depth)
+			return ProcessResult{AuditPending: true}
+		case errors.Is(err, errSeatsExhausted):
+			return e.handleSeatsExhausted(mr, f)
+		case errors.Is(err, errSpawnFailed):
+			return e.handleSpawnFailure(mr, f)
+		default:
 			return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: arming panel for %s: %v", mr.ID, err)}
 		}
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Audit panel armed for MR %s at %s (round 1, %d seat(s), depth=%s) — parking until verdicts land\n", mr.ID, shortSHA(head), size, depth)
-		return ProcessResult{AuditPending: true}
 
 	case actionRearm:
 		if err := e.rearmPanelForNewSHA(mr, f, head, depth, now); err != nil {
@@ -696,22 +727,183 @@ func (e *Engineer) auditGate(mr *MRInfo, now time.Time) ProcessResult {
 		// Exactly one aggregated FIX_NEEDED per round, sent only by the Refinery.
 		// Seats stay resident (persistent context) until the worker pushes a fix.
 		if fixNeededDue(f.AuditFixSentRound, f.AuditRound) {
+			// This is a genuine request_changes round — and only such a round —
+			// so it advances the consecutive-dissent counter toward round_limit.
+			// Infra faults never reach here (they return early with an Error).
+			dissentRounds := f.AuditDissentRounds + 1
+
+			if roundLimitReached(dissentRounds, e.config.Audit.RoundLimit) {
+				// Hard limit hit: stop asking for fixes. Record the final dissent
+				// round (audit trail) and hard-block + escalate to a human/Mayor.
+				if err := e.recordDissentRound(mr.ID, f.AuditRound, dissentRounds); err != nil {
+					_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to record final dissent round for %s: %v\n", mr.ID, err)
+				}
+				e.blockAudit(mr, fmt.Sprintf("audit dissented %d consecutive rounds (round_limit=%d)", dissentRounds, e.config.Audit.RoundLimit))
+				return ProcessResult{AuditPending: true}
+			}
+
 			findings := aggregateFindings(dissents)
 			if err := e.auditFixNotify(mr, f.AuditRound, findings); err != nil {
+				// Not recorded — the dissent counter and FIX_NEEDED advance in
+				// lockstep, so a failed notify retries next cycle without
+				// double-counting the round toward round_limit.
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to send audit FIX_NEEDED for %s: %v (will retry next cycle)\n", mr.ID, err)
 				return ProcessResult{AuditPending: true}
 			}
-			if err := e.markFixSent(mr.ID, f.AuditRound); err != nil {
+			if err := e.recordDissentRound(mr.ID, f.AuditRound, dissentRounds); err != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to record FIX_NEEDED round for %s: %v\n", mr.ID, err)
 			}
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Audit round %d dissent on MR %s — sent one aggregated FIX_NEEDED to %s; seats held resident\n", f.AuditRound, mr.ID, mr.Worker)
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Audit round %d dissent on MR %s (%d/%d) — sent one aggregated FIX_NEEDED to %s; seats held resident\n", f.AuditRound, mr.ID, dissentRounds, e.config.Audit.RoundLimit, mr.Worker)
 		} else {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Audit round %d still dissenting on MR %s — FIX_NEEDED already sent, awaiting fix\n", f.AuditRound, mr.ID)
 		}
 		return ProcessResult{AuditPending: true}
 
 	default: // actionPending
+		// Verdicts are still outstanding. The MR stays parked (fail-closed — a
+		// missing/slow verdict NEVER auto-rejects), but a wedged audit must not be
+		// silent: before the soft deadline we try to revive a crashed Nun once;
+		// after it we escalate slowness to the Mayor without ever blocking.
+		if deadlineNotifyDue(f.AuditDeadline, f.AuditRound, f.AuditDeadlineNotifiedRound, now) {
+			msg := fmt.Sprintf("AUDIT_SLOW: MR %s issue=%s — audit round %d passed its wall_clock_min (%dm) deadline with verdicts still outstanding; NOT blocked or force-merged, the audit keeps running",
+				mr.ID, mr.SourceIssue, f.AuditRound, e.config.Audit.WallClockMin)
+			if err := e.auditMayorNotify(mr, "", msg); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to notify Mayor of slow audit for %s: %v (will retry next cycle)\n", mr.ID, err)
+			} else {
+				if err := e.setDeadlineNotified(mr.ID, f.AuditRound); err != nil {
+					_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to record slow-audit notify round for %s: %v\n", mr.ID, err)
+				}
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Audit round %d on MR %s exceeded wall_clock_min — notified Mayor (non-blocking, audit continues)\n", f.AuditRound, mr.ID)
+			}
+		} else if checker, ok := e.seatSpawner.(SeatLivenessChecker); ok && !deadlinePassed(f.AuditDeadline, now) {
+			// Mid-audit crash check only runs before the deadline (after it, the
+			// slow-path notify above covers a wedged audit) and only when the
+			// spawner can report seat liveness.
+			if crashed := crashedSeats(parseSeats(f.AuditSeats), verdicts, mr.ID, head, checker.SeatAlive); len(crashed) > 0 {
+				e.handleCrashedSeats(mr, f, head, depth, crashed, now)
+			}
+		}
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Audit not yet unanimous for MR %s at %s — parking\n", mr.ID, shortSHA(head))
 		return ProcessResult{AuditPending: true}
 	}
+}
+
+// handleSeatsExhausted parks an MR whose panel could not be armed because the Nun
+// roster or the max_seats quota is exhausted. The MR is never merged un-audited;
+// a fresh spawn is attempted next cycle. The Mayor is notified once per park event
+// (debounced via AuditParkEscalated, cleared when a panel eventually arms).
+func (e *Engineer) handleSeatsExhausted(mr *MRInfo, f *beads.MRFields) ProcessResult {
+	if !f.AuditParkEscalated {
+		msg := fmt.Sprintf("AUDIT_PARKED: MR %s issue=%s — no Nun seat available (roster/max_seats exhausted); parked audit-pending, will retry spawn next cycle (never merged un-audited)",
+			mr.ID, mr.SourceIssue)
+		if err := e.auditMayorNotify(mr, "", msg); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to notify Mayor of parked audit for %s: %v\n", mr.ID, err)
+		} else {
+			if err := e.setParkEscalated(mr.ID, true); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to record park-escalation for %s: %v\n", mr.ID, err)
+			}
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Audit seats exhausted for MR %s — parked, notified Mayor (debounced)\n", mr.ID)
+		}
+	} else {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Audit seats still exhausted for MR %s — parked, Mayor already notified this park\n", mr.ID)
+	}
+	return ProcessResult{AuditPending: true}
+}
+
+// handleSpawnFailure drives the bounded fresh-panel spawn-retry path. Each failure
+// advances AuditSpawnAttempts; while the retry budget remains the MR is parked and
+// re-attempted next cycle, and once the budget is exhausted the MR is hard-blocked
+// + escalated. A clean arm resets the counter (in writeAuditState).
+func (e *Engineer) handleSpawnFailure(mr *MRInfo, f *beads.MRFields) ProcessResult {
+	attempts := f.AuditSpawnAttempts + 1
+	if err := e.setSpawnAttempts(mr.ID, attempts); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to record spawn attempt for %s: %v\n", mr.ID, err)
+	}
+	if spawnRetriesExhausted(attempts, auditSpawnMaxRetries) {
+		e.blockAudit(mr, fmt.Sprintf("Nun seat spawn failed %d times (retry budget %d exhausted)", attempts, auditSpawnMaxRetries))
+		return ProcessResult{AuditPending: true}
+	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Audit seat spawn failed for MR %s (attempt %d/%d) — parked, will retry next cycle\n", mr.ID, attempts, auditSpawnMaxRetries+1)
+	return ProcessResult{AuditPending: true}
+}
+
+// seatsWithVerdict returns the set of seats that have written a verdict pinned to
+// (mrID, sha) — used to tell a crashed-and-silent Nun from one that simply has not
+// voted yet but is still alive.
+func seatsWithVerdict(verdicts []*beads.Issue, mrID, sha string) map[string]bool {
+	mrLabel := "mr:" + mrID
+	shaLabel := "sha:" + sha
+	voted := map[string]bool{}
+	for _, v := range verdicts {
+		if !beads.HasLabel(v, mrLabel) || !beads.HasLabel(v, shaLabel) {
+			continue
+		}
+		if s := parseSeatLabel(v.Labels); s != "" {
+			voted[s] = true
+		}
+	}
+	return voted
+}
+
+// crashedSeats returns the seats that crashed mid-audit: their session is no
+// longer alive AND they have not written a verdict pinned to the current SHA. A
+// liveness-probe error is treated as "alive" (fail-open — never tear down a Nun
+// we cannot prove is dead).
+func crashedSeats(seats []string, verdicts []*beads.Issue, mrID, sha string, aliveFn func(string) (bool, error)) []string {
+	voted := seatsWithVerdict(verdicts, mrID, sha)
+	var crashed []string
+	for _, s := range seats {
+		if voted[s] {
+			continue
+		}
+		alive, err := aliveFn(s)
+		if err != nil || alive {
+			continue
+		}
+		crashed = append(crashed, s)
+	}
+	return crashed
+}
+
+// handleCrashedSeats revives mid-audit-crashed Nuns. The first crash in a round
+// respawns each dead seat fresh/clean against the current SHA (debounced via
+// AuditRespawnedRound); a second crash in the same round is not transient, so it
+// escalates while keeping the MR parked (fail-closed — never merges un-audited).
+func (e *Engineer) handleCrashedSeats(mr *MRInfo, f *beads.MRFields, head, depth string, crashed []string, now time.Time) {
+	names := strings.Join(crashed, ",")
+	if crashRespawnExhausted(f.AuditRespawnedRound, f.AuditRound, auditCrashMaxRespawns) {
+		msg := fmt.Sprintf("AUDIT_CRASH: MR %s issue=%s — Nun seat(s) %s crashed again in round %d after a respawn; the audit cannot complete itself, needs intervention (MR stays parked, not merged)",
+			mr.ID, mr.SourceIssue, names, f.AuditRound)
+		if err := e.auditMayorNotify(mr, "high", msg); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to escalate repeat Nun crash for %s: %v\n", mr.ID, err)
+		}
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Audit MR %s — repeat crash of %s after respawn; escalated to Mayor, parked\n", mr.ID, names)
+		return
+	}
+
+	seats := parseSeats(f.AuditSeats)
+	flavors := parseSeats(f.AuditFlavors)
+	if e.seatSpawner != nil {
+		for _, name := range crashed {
+			if err := e.seatSpawner.SpawnSeat(e.seatRequest(mr, head, f.AuditRound, name, depth, seatFlavor(seats, flavors, name))); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to respawn crashed Nun %s for MR %s: %v\n", name, mr.ID, err)
+			}
+		}
+	}
+	if err := e.setRespawnedRound(mr.ID, f.AuditRound); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to record crash-respawn round for %s: %v\n", mr.ID, err)
+	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Audit MR %s — respawned crashed Nun(s) %s fresh against %s (round %d)\n", mr.ID, names, shortSHA(head), f.AuditRound)
+}
+
+// seatFlavor returns the perspective lens persisted for seat `name` (seats and
+// flavors are positionally parallel), falling back to the holistic flavorGeneral
+// when the pairing is missing or out of sync.
+func seatFlavor(seats, flavors []string, name string) string {
+	for i, s := range seats {
+		if s == name && i < len(flavors) {
+			return flavors[i]
+		}
+	}
+	return flavorGeneral
 }

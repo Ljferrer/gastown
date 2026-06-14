@@ -284,6 +284,14 @@ type Engineer struct {
 	// gt nudge to the worker — no permanent Dolt commit). Injectable so the
 	// fix loop is unit-testable; defaults to defaultAuditFixNotify.
 	auditFixNotify func(mr *MRInfo, round int, findings string) error
+
+	// auditMayorNotify escalates an audit bounds/backpressure condition to the
+	// Mayor (and, for HIGH/CRITICAL severities, a human). severity "" sends a
+	// non-durable nudge (soft, debounced notifications: slow audits, parks);
+	// severity "high"/"critical" runs gt escalate (hard blocks: round-limit,
+	// repeated spawn failure, repeated crash). Injectable for unit tests; defaults
+	// to defaultAuditMayorNotify.
+	auditMayorNotify func(mr *MRInfo, severity, msg string) error
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -320,6 +328,7 @@ func NewEngineer(r *rig.Rig) *Engineer {
 		mergeSlotRetryBackoff: 500 * time.Millisecond,
 	}
 	eng.auditFixNotify = eng.defaultAuditFixNotify
+	eng.auditMayorNotify = eng.defaultAuditMayorNotify
 	return eng
 }
 
@@ -335,6 +344,30 @@ func (e *Engineer) defaultAuditFixNotify(mr *MRInfo, round int, findings string)
 	msg := fmt.Sprintf("FIX_NEEDED (audit round %d): branch=%s issue=%s — the Nun audit requested changes. Address every point below in-place, then resubmit with 'gt done':\n%s",
 		round, mr.Branch, mr.SourceIssue, findings)
 	cmd := exec.Command("gt", "nudge", target, msg)
+	util.SetDetachedProcessGroup(cmd)
+	cmd.Dir = e.workDir
+	return cmd.Run()
+}
+
+// defaultAuditMayorNotify routes an audit bounds/backpressure escalation to the
+// Mayor. Soft signals (severity == "") use a non-durable nudge — the same
+// zero-Dolt-commit channel as FIX_NEEDED — for slowness and park notifications
+// that must reach the Mayor but need not survive a session death. Hard signals
+// (severity "high"/"critical") run gt escalate so a durable, human-visible
+// escalation bead is created (round-limit, repeated spawn failure / crash): these
+// hard-block a merge and a human must intervene.
+func (e *Engineer) defaultAuditMayorNotify(mr *MRInfo, severity, msg string) error {
+	if severity == "" {
+		cmd := exec.Command("gt", "nudge", "mayor/", msg)
+		util.SetDetachedProcessGroup(cmd)
+		cmd.Dir = e.workDir
+		return cmd.Run()
+	}
+	fingerprint := fmt.Sprintf("refinery-audit:%s", mr.ID)
+	cmd := exec.Command("gt", "escalate", msg,
+		"--severity", severity,
+		"--source", "refinery-audit",
+		"--fingerprint", fingerprint)
 	util.SetDetachedProcessGroup(cmd)
 	cmd.Dir = e.workDir
 	return cmd.Run()

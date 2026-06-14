@@ -612,6 +612,7 @@ type MRFields struct {
 	AuditRound    int    // 1-based round counter (panel-wide)
 	AuditDeadline string // ISO 8601 wall-clock deadline for the current round
 	AuditSeats    string // Comma-separated leased Nun roster names for this panel
+	AuditFlavors  string // Comma-separated perspective lenses, positionally parallel to AuditSeats
 }
 
 // ParseMRFields extracts structured merge-request fields from an issue's description.
@@ -712,6 +713,9 @@ func ParseMRFields(issue *Issue) *MRFields {
 		case "audit_seats", "audit-seats", "auditseats":
 			fields.AuditSeats = value
 			hasFields = true
+		case "audit_flavors", "audit-flavors", "auditflavors":
+			fields.AuditFlavors = value
+			hasFields = true
 		}
 	}
 
@@ -800,6 +804,9 @@ func FormatMRFields(fields *MRFields) string {
 	if fields.AuditSeats != "" {
 		lines = append(lines, "audit_seats: "+fields.AuditSeats)
 	}
+	if fields.AuditFlavors != "" {
+		lines = append(lines, "audit_flavors: "+fields.AuditFlavors)
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -870,6 +877,9 @@ func SetMRFields(issue *Issue, fields *MRFields) string {
 		"audit_seats":       true,
 		"audit-seats":       true,
 		"auditseats":        true,
+		"audit_flavors":     true,
+		"audit-flavors":     true,
+		"auditflavors":      true,
 	}
 
 	// Collect non-MR lines from existing description

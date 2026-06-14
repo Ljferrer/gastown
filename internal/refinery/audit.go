@@ -41,7 +41,46 @@ const (
 
 	// auditLabelPending marks an MR whose panel is armed and awaiting verdicts.
 	auditLabelPending = "audit-pending"
+
+	// auditLabelCoven opts an MR into a coven audit: the panel scales to
+	// coven_size seats AND deepens to full agent-judgment impact tracing
+	// (depth=deep). Absent, an MR gets the default single-Nun neighbors-depth
+	// review.
+	auditLabelCoven = "audit:coven"
+
+	// Audit depth tiers. neighbors (default) = the diff plus the definitions and
+	// callers the changed lines directly reference (one hop), under a per-round
+	// time budget; deep (coven) = follow the impact wherever it leads.
+	auditDepthNeighbors = "neighbors"
+	auditDepthDeep      = "deep"
 )
+
+// NunFlavors is the perspective-diversity roster: each coven seat is spun up with
+// a distinct lens so the panel searches divergent angles rather than running N
+// identical reads. Seat i is assigned NunFlavors[i % len(NunFlavors)], and that
+// flavor is persisted on the MR bead so each Nun keeps her lens across rounds and
+// across a Refinery restart. plan-faithfulness is intentionally last so that a
+// single extra seat beyond {correctness, security} adds the plan lens.
+var NunFlavors = []string{"correctness", "security", "plan-faithfulness"}
+
+// flavorGeneral is the lens for a single-Nun (non-coven) review: a holistic read
+// with no narrowed perspective. Perspective diversity only applies for N>1.
+const flavorGeneral = "general"
+
+// assignFlavors returns n per-seat lenses. A single seat gets the holistic
+// flavorGeneral (one read needs no diversity); n>1 cycles the NunFlavors roster
+// so each seat in the coven carries a distinct angle. Assignment is by position,
+// so it is stable for a given seat index across rounds.
+func assignFlavors(n int) []string {
+	if n <= 1 {
+		return []string{flavorGeneral}
+	}
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		out[i] = NunFlavors[i%len(NunFlavors)]
+	}
+	return out
+}
 
 // errSeatsExhausted is returned when the Nun roster or the max_seats quota is
 // exhausted; the MR stays parked audit-pending and a fresh spawn is attempted
@@ -53,7 +92,8 @@ type AuditConfig struct {
 	Enabled      bool   `json:"enabled"`        // master switch — default false
 	Formula      string `json:"formula"`        // bundled reference molecule
 	Model        string `json:"model"`          // pinned model for Nuns (e.g. "opus")
-	PanelSize    int    `json:"panel_size"`     // seats on a normal MR
+	PanelSize    int    `json:"panel_size"`     // seats on a normal MR (default depth=neighbors)
+	CovenSize    int    `json:"coven_size"`     // seats when the MR is labeled audit:coven (depth=deep)
 	MaxSeats     int    `json:"max_seats"`      // rig-wide concurrent Nun quota
 	RoundLimit   int    `json:"round_limit"`    // dissenting rounds before escalate-to-Mayor
 	WallClockMin int    `json:"wall_clock_min"` // soft per-round deadline (minutes)
@@ -68,6 +108,7 @@ func DefaultAuditConfig() *AuditConfig {
 		Formula:      "mol-nun-audit",
 		Model:        "opus",
 		PanelSize:    1,
+		CovenSize:    3,
 		MaxSeats:     6,
 		RoundLimit:   3,
 		WallClockMin: 60,
@@ -83,6 +124,7 @@ type auditConfigRaw struct {
 	Formula      *string `json:"formula"`
 	Model        *string `json:"model"`
 	PanelSize    *int    `json:"panel_size"`
+	CovenSize    *int    `json:"coven_size"`
 	MaxSeats     *int    `json:"max_seats"`
 	RoundLimit   *int    `json:"round_limit"`
 	WallClockMin *int    `json:"wall_clock_min"`
@@ -105,6 +147,9 @@ func (raw *auditConfigRaw) apply(cfg *AuditConfig) {
 	}
 	if raw.PanelSize != nil {
 		cfg.PanelSize = *raw.PanelSize
+	}
+	if raw.CovenSize != nil {
+		cfg.CovenSize = *raw.CovenSize
 	}
 	if raw.MaxSeats != nil {
 		cfg.MaxSeats = *raw.MaxSeats
@@ -189,6 +234,8 @@ type SeatSpawnRequest struct {
 	Formula     string
 	Model       string
 	Verdict     string
+	Depth       string // audit depth tier: "neighbors" (default) or "deep" (coven)
+	Flavor      string // perspective lens for this seat (e.g. "correctness"); "general" for a single-Nun review
 }
 
 // SeatSpawner launches and tears down restricted read-only audit seats. The
@@ -210,6 +257,22 @@ func (e *Engineer) SetSeatSpawner(s SeatSpawner) {
 // auditEnabled reports whether the Nun audit gate is configured on and active.
 func (e *Engineer) auditEnabled() bool {
 	return e.config != nil && e.config.Audit != nil && e.config.Audit.Enabled
+}
+
+// panelParams returns the effective seat count and audit depth for an MR given
+// its labels. The audit:coven label scales the panel to coven_size seats and
+// deepens the review to full impact tracing (depth=deep); without it, the
+// default single-Nun (panel_size) neighbors-depth review applies. The returned
+// size is the unanimity threshold the tally enforces, so size and depth always
+// travel together.
+func (e *Engineer) panelParams(labels []string) (size int, depth string) {
+	cfg := e.config.Audit
+	for _, l := range labels {
+		if l == auditLabelCoven {
+			return cfg.CovenSize, auditDepthDeep
+		}
+	}
+	return cfg.PanelSize, auditDepthNeighbors
 }
 
 // leasedNuns returns the set of Nun names currently leased across all open MR
@@ -242,8 +305,11 @@ func (e *Engineer) leasedNuns(excludeMRID string) (map[string]bool, error) {
 }
 
 // writeAuditState persists the panel state onto the MR bead (audit_sha,
-// audit_round, audit_deadline, audit_seats). The bead is the source of truth.
-func (e *Engineer) writeAuditState(mrID, sha string, round int, deadline string, seats []string) error {
+// audit_round, audit_deadline, audit_seats, audit_flavors). The bead is the
+// source of truth, so the seat→flavor pairing survives a Refinery restart and
+// each Nun keeps her lens across rounds. seats and flavors are positionally
+// parallel.
+func (e *Engineer) writeAuditState(mrID, sha string, round int, deadline string, seats, flavors []string) error {
 	issue, err := e.beads.Show(mrID)
 	if err != nil {
 		return err
@@ -256,16 +322,19 @@ func (e *Engineer) writeAuditState(mrID, sha string, round int, deadline string,
 	f.AuditRound = round
 	f.AuditDeadline = deadline
 	f.AuditSeats = formatSeats(seats)
+	f.AuditFlavors = formatSeats(flavors)
 	desc := beads.SetMRFields(issue, f)
 	return e.beads.Update(mrID, beads.UpdateOptions{Description: &desc})
 }
 
 // ensureAuditPanel arms a fresh panel for mr at headSHA: it releases any prior
-// seats this MR held, leases PanelSize new Nun names (respecting MaxSeats and the
-// roster), stamps panel state on the bead, labels the MR audit-pending, and asks
-// the spawner to launch each seat. Returns errSeatsExhausted (parked, retry next
-// cycle) when no seat is available.
-func (e *Engineer) ensureAuditPanel(mr *MRInfo, headSHA string, now time.Time) error {
+// seats this MR held, leases `size` new Nun names (respecting MaxSeats and the
+// roster), assigns each seat a distinct perspective lens, stamps panel state on
+// the bead, labels the MR audit-pending, and asks the spawner to launch each
+// seat at the given depth. size and depth are the effective coven/default params
+// from panelParams. Returns errSeatsExhausted (parked, retry next cycle) when no
+// seat is available.
+func (e *Engineer) ensureAuditPanel(mr *MRInfo, headSHA string, size int, depth string, now time.Time) error {
 	cfg := e.config.Audit
 
 	// Release any seats from a prior round/SHA before re-leasing.
@@ -286,7 +355,7 @@ func (e *Engineer) ensureAuditPanel(mr *MRInfo, headSHA string, now time.Time) e
 	active := len(inUse)
 
 	var leased []string
-	for i := 0; i < cfg.PanelSize; i++ {
+	for i := 0; i < size; i++ {
 		if active+len(leased) >= cfg.MaxSeats {
 			return errSeatsExhausted
 		}
@@ -298,8 +367,10 @@ func (e *Engineer) ensureAuditPanel(mr *MRInfo, headSHA string, now time.Time) e
 		leased = append(leased, name)
 	}
 
+	flavors := assignFlavors(len(leased))
+
 	deadline := now.Add(time.Duration(cfg.WallClockMin) * time.Minute).UTC().Format(time.RFC3339)
-	if err := e.writeAuditState(mr.ID, headSHA, 1, deadline, leased); err != nil {
+	if err := e.writeAuditState(mr.ID, headSHA, 1, deadline, leased, flavors); err != nil {
 		return err
 	}
 	if err := e.beads.Update(mr.ID, beads.UpdateOptions{AddLabels: []string{auditLabelPending}}); err != nil {
@@ -307,7 +378,7 @@ func (e *Engineer) ensureAuditPanel(mr *MRInfo, headSHA string, now time.Time) e
 	}
 
 	if e.seatSpawner != nil {
-		for _, name := range leased {
+		for i, name := range leased {
 			req := SeatSpawnRequest{
 				MRID:        mr.ID,
 				SourceIssue: mr.SourceIssue,
@@ -319,6 +390,8 @@ func (e *Engineer) ensureAuditPanel(mr *MRInfo, headSHA string, now time.Time) e
 				Formula:     cfg.Formula,
 				Model:       cfg.Model,
 				Verdict:     cfg.Verdict,
+				Depth:       depth,
+				Flavor:      flavors[i],
 			}
 			if err := e.seatSpawner.SpawnSeat(req); err != nil {
 				return fmt.Errorf("spawning seat %s for MR %s: %w", name, mr.ID, err)
@@ -426,18 +499,24 @@ func (e *Engineer) auditGate(mr *MRInfo, now time.Time) ProcessResult {
 		auditSHA = f.AuditSHA
 	}
 
+	// The audit:coven label scales the panel to coven_size seats at depth=deep;
+	// otherwise the default panel_size/neighbors review applies. size is also the
+	// unanimity threshold the tally enforces below.
+	size, depth := e.panelParams(issue.Labels)
+
 	// No panel yet, or HEAD moved since the panel was armed → (re)arm a fresh
 	// panel at the live HEAD and park. Approval is always against the current SHA.
 	if auditSHA == "" || auditSHA != head {
-		if err := e.ensureAuditPanel(mr, head, now); err != nil {
+		if err := e.ensureAuditPanel(mr, head, size, depth, now); err != nil {
 			return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: arming panel for %s: %v", mr.ID, err)}
 		}
-		_, _ = fmt.Fprintf(e.output, "[Engineer] Audit panel armed for MR %s at %s — parking until verdicts land\n", mr.ID, shortSHA(head))
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Audit panel armed for MR %s at %s (%d seat(s), depth=%s) — parking until verdicts land\n", mr.ID, shortSHA(head), size, depth)
 		return ProcessResult{AuditPending: true}
 	}
 
-	// Panel armed at the live HEAD — tally verdicts.
-	ok, err := e.auditApproved(mr.ID, head, e.config.Audit.PanelSize)
+	// Panel armed at the live HEAD — tally verdicts. Unanimity across all `size`
+	// seats at this single SHA is required.
+	ok, err := e.auditApproved(mr.ID, head, size)
 	if err != nil {
 		return ProcessResult{AuditPending: true, Error: fmt.Sprintf("audit: tallying %s: %v", mr.ID, err)}
 	}

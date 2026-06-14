@@ -177,6 +177,10 @@ type MergeQueueConfig struct {
 	// Batch holds configuration for the batch-then-bisect merge queue.
 	// When nil or MaxBatchSize <= 1, batching is disabled and MRs process sequentially.
 	Batch *BatchConfig `json:"batch,omitempty"`
+
+	// Audit holds the opt-in Nun audit-gate configuration. Disabled by default
+	// (Audit.Enabled=false) — no behavior change until a rig opts in. See audit.go.
+	Audit *AuditConfig `json:"audit,omitempty"`
 }
 
 // DefaultMergeQueueConfig returns sensible defaults for merge queue configuration.
@@ -196,6 +200,7 @@ func DefaultMergeQueueConfig() *MergeQueueConfig {
 		StaleClaimCriticalAfter: 6 * time.Hour,
 		MaxRetryCount:           5,
 		AutoPush:                true,
+		Audit:                   DefaultAuditConfig(),
 	}
 }
 
@@ -268,6 +273,11 @@ type Engineer struct {
 	mergeSlotRelease      func(holder string) error
 	mergeSlotMaxRetries   int           // Max retries for slot acquisition (0 = no retry)
 	mergeSlotRetryBackoff time.Duration // Initial backoff between retries
+
+	// seatSpawner launches/tears down restricted read-only Nun audit seats.
+	// nil when no spawn wiring is installed (audit panel state is still stamped
+	// on the bead, but no agent is launched). See audit.go.
+	seatSpawner SeatSpawner
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -354,6 +364,7 @@ func (e *Engineer) LoadConfig() error {
 		MergeStrategy        *string                   `json:"merge_strategy"`
 		VCSProvider          *string                   `json:"vcs_provider"`
 		RequireReview        *bool                     `json:"require_review"`
+		Audit                *auditConfigRaw           `json:"audit"`
 	}
 
 	if err := json.Unmarshal(rawConfig.MergeQueue, &mqRaw); err != nil {
@@ -442,6 +453,14 @@ func (e *Engineer) LoadConfig() error {
 		e.config.RequireReview = mqRaw.RequireReview
 	}
 
+	// Merge audit-gate config over defaults (nil block = keep defaults = disabled).
+	if mqRaw.Audit != nil {
+		if e.config.Audit == nil {
+			e.config.Audit = DefaultAuditConfig()
+		}
+		mqRaw.Audit.apply(e.config.Audit)
+	}
+
 	// Initialize the PR provider when merge_strategy=pr.
 	if e.config.MergeStrategy == "pr" {
 		if err := e.initPRProvider(); err != nil {
@@ -494,6 +513,7 @@ type ProcessResult struct {
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
 	NoMerge        bool // Source issue has no_merge flag — intentionally blocked, not a failure
 	NeedsApproval  bool // PR exists but lacks required approving review (merge_strategy=pr)
+	AuditPending   bool // Nun audit gate has not yet approved this MR at current HEAD — park, retry
 }
 
 // doMerge performs the actual git merge operation.
@@ -1140,6 +1160,13 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 	_, _ = fmt.Fprintf(e.output, "  Target: %s\n", mr.Target)
 	_, _ = fmt.Fprintf(e.output, "  Worker: %s\n", mr.Worker)
 	_, _ = fmt.Fprintf(e.output, "  Source: %s\n", mr.SourceIssue)
+
+	// Nun audit gate (opt-in). Runs BEFORE the pre-verification fast-path so the
+	// skipGates self-certification — exactly what the Nun exists to distrust —
+	// can never bypass the audit. A pending audit parks the MR for a later cycle.
+	if gate := e.auditGate(mr, time.Now()); gate.AuditPending {
+		return gate
+	}
 
 	// Phase 3: Check pre-verification fast-path.
 	// If the polecat already rebased onto the target and ran gates, and the target

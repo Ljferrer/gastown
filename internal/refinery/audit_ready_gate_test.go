@@ -236,9 +236,9 @@ func TestResolveMRHead_RemoteOnlyBranch(t *testing.T) {
 	workDir, g, cleanup := testGitRepo(t)
 	defer cleanup()
 
-	// The exact branch shape from the live repro: present only as origin/<branch>,
-	// no local ref. The @mqedg15y suffix is incidental — it resolves fine once the
-	// origin/ prefix is applied.
+	// The exact branch shape from the live repro: present only as the remote-tracking
+	// ref, no local ref. The @mqedg15y suffix is the mq session marker; it resolves
+	// once the ref is fully qualified as refs/remotes/origin/<branch> (lgt-8u1).
 	const branch = "polecat/furiosa/gtt-zem@mqedg15y"
 	createRemoteOnlyBranch(t, workDir, branch, "a.txt", "hello a\n")
 
@@ -251,16 +251,68 @@ func TestResolveMRHead_RemoteOnlyBranch(t *testing.T) {
 		t.Fatal("precondition failed: bare branch name resolved; the repro requires a remote-only branch")
 	}
 
-	// The fix: resolveMRHead resolves the same branch via origin/<branch>.
+	// The fix: resolveMRHead resolves the same branch via refs/remotes/origin/<branch>.
 	head, err := e.resolveMRHead(branch)
 	if err != nil {
-		t.Fatalf("resolveMRHead must resolve a remote-only branch via origin/<branch>, got error: %v", err)
+		t.Fatalf("resolveMRHead must resolve a remote-only branch via refs/remotes/origin/<branch>, got error: %v", err)
 	}
 
-	// It must equal origin/<branch>'s tip — the commit the merge path lands.
-	want := run(t, workDir, "git", "rev-parse", "origin/"+branch)
+	// It must equal the remote-tracking ref's tip — the commit the merge path lands.
+	want := run(t, workDir, "git", "rev-parse", "refs/remotes/origin/"+branch)
 	if head != want {
-		t.Errorf("resolveMRHead = %s, want %s (origin/<branch> tip)", head, want)
+		t.Errorf("resolveMRHead = %s, want %s (refs/remotes/origin/<branch> tip)", head, want)
+	}
+}
+
+// TestResolveMRHead_QualifiedRefBeatsShadowingLocal is the lgt-8u1 regression. mq
+// branches carry an @<session> suffix. The short origin/<branch> form (lgt-6g4) is
+// subject to git's DWIM ref-resolution: when a LOCAL ref of the same name shadows
+// the remote-tracking ref, `git rev-parse origin/<branch>` resolves to the LOCAL ref
+// with only an "ambiguous" warning to stderr and exit 0 — silently SHA-pinning the
+// audit verdict to the WRONG commit (worse than the hard failure it usually causes).
+// resolveMRHead must fully qualify as refs/remotes/origin/<branch> so it deterministic-
+// ally lands the remote tip the merge path will use, regardless of any local shadow.
+func TestResolveMRHead_QualifiedRefBeatsShadowingLocal(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	// Remote-only mq branch: refs/remotes/origin/<branch> exists, no plain local ref.
+	const branch = "polecat/furiosa/gtt-zem@mqedg15y"
+	createRemoteOnlyBranch(t, workDir, branch, "a.txt", "remote a\n")
+	remoteTip := run(t, workDir, "git", "rev-parse", "refs/remotes/origin/"+branch)
+
+	// A LOCAL branch literally named "origin/<branch>" at a DIFFERENT commit. This is
+	// the refs/heads/origin/<branch> shadow that makes the short origin/<branch> form
+	// ambiguous and steers git's DWIM to the wrong (local) ref.
+	run(t, workDir, "git", "checkout", "-b", "shadow-src", "main")
+	writeFile(t, workDir, "b.txt", "local shadow\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "shadow: divergent commit")
+	localShadowTip := run(t, workDir, "git", "rev-parse", "HEAD")
+	run(t, workDir, "git", "branch", "origin/"+branch, "shadow-src")
+	run(t, workDir, "git", "checkout", "main")
+
+	if remoteTip == localShadowTip {
+		t.Fatal("precondition failed: remote tip and shadow tip must differ to expose the wrong-SHA bug")
+	}
+
+	e := newTestEngineer(t, workDir, g)
+
+	// Document the trap: the short form silently resolves the WRONG (shadow) commit.
+	if got, err := e.git.Rev("origin/" + branch); err == nil && got != localShadowTip {
+		t.Logf("note: short origin/<branch> resolved %s (expected the shadow %s); DWIM behavior is git-version dependent", got, localShadowTip)
+	}
+
+	// The fix: resolveMRHead pins the remote tip, never the local shadow.
+	head, err := e.resolveMRHead(branch)
+	if err != nil {
+		t.Fatalf("resolveMRHead must resolve the @-suffixed mq branch, got error: %v", err)
+	}
+	if head != remoteTip {
+		t.Errorf("resolveMRHead = %s, want %s (remote tip); a shadowing local ref must not win", head, remoteTip)
+	}
+	if head == localShadowTip {
+		t.Errorf("resolveMRHead resolved the shadowing LOCAL ref %s — audit verdict would SHA-pin the wrong commit", head)
 	}
 }
 

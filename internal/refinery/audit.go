@@ -711,12 +711,21 @@ func filterVerdictsBySeat(verdicts []*beads.Issue, seat string) []*beads.Issue {
 
 // resolveMRHead resolves the tip commit of an MR's branch. The merge-queue branch
 // lives on the remote and, in the refinery worktree, is typically present only as
-// a remote-tracking ref (origin/<branch>) — the local ref does not exist — so it is
-// resolved against origin/<branch> first, falling back to the bare name for the
-// local-branch case. Resolving the bare name alone fails closed with "unknown
-// revision" and parks the merge queue on every MR in an audit-enabled rig (lgt-6g4).
+// a remote-tracking ref — the local ref does not exist — so it is resolved against
+// the remote-tracking ref first, falling back to the bare name for the local-branch
+// case. Resolving the bare name alone fails closed with "unknown revision" and parks
+// the merge queue on every MR in an audit-enabled rig (lgt-6g4).
+//
+// The remote ref is fully qualified as refs/remotes/origin/<branch> rather than the
+// short origin/<branch> form (lgt-8u1). mq branches carry an @<session> suffix
+// (e.g. polecat/furiosa/gtt-zem@mqedg15y); the short form is subject to git's DWIM
+// ref-resolution, which (a) can fail outright on '@'-suffixed names in some git
+// versions and (b) — worse — silently resolves to a shadowing local ref of the same
+// name with only an "ambiguous" warning to stderr (exit 0), SHA-pinning the audit
+// verdict to the wrong commit. The fully-qualified ref is unambiguous and resolves
+// the same '@'-suffixed mq ref deterministically across git versions.
 func (e *Engineer) resolveMRHead(branch string) (string, error) {
-	if head, err := e.git.Rev("origin/" + branch); err == nil {
+	if head, err := e.git.Rev("refs/remotes/origin/" + branch); err == nil {
 		return head, nil
 	}
 	return e.git.Rev(branch)

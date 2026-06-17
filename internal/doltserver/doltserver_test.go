@@ -2279,11 +2279,33 @@ func TestIssuePrefixForRigInit_PrefersRigsConfigBeforeFallback(t *testing.T) {
 	}
 }
 
-func TestIssuePrefixForRigInit_FallsBackToRigName(t *testing.T) {
+func TestIssuePrefixForRigInit_PrefersConfigYAMLBeforeFallback(t *testing.T) {
+	townRoot := t.TempDir()
+	rigBeadsDir := filepath.Join(townRoot, "testrig", ".beads")
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// The mayor configured the rig's own config.yaml correctly. Before lgt-bto
+	// this source was ignored and the directory name leaked into wisp prefixes.
+	if err := os.WriteFile(filepath.Join(rigBeadsDir, "config.yaml"), []byte("issue-prefix: cy-\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := issuePrefixForRigInit(townRoot, "testrig"); got != "cy" {
+		t.Fatalf("issuePrefixForRigInit() = %q, want cy", got)
+	}
+}
+
+func TestIssuePrefixForRigInit_FallsBackToDerivedShortPrefix(t *testing.T) {
 	townRoot := t.TempDir()
 
-	if got := issuePrefixForRigInit(townRoot, "newrig"); got != "newrig" {
-		t.Fatalf("issuePrefixForRigInit() = %q, want newrig", got)
+	// With nothing configured, the prefix is derived as a SHORT prefix from the
+	// rig name — never the raw directory name (lgt-bto). "LokustGasTown" -> "lgt".
+	if got := issuePrefixForRigInit(townRoot, "LokustGasTown"); got != "lgt" {
+		t.Fatalf("issuePrefixForRigInit(LokustGasTown) = %q, want lgt", got)
+	}
+	if got := issuePrefixForRigInit(townRoot, "newrig"); got != "ne" {
+		t.Fatalf("issuePrefixForRigInit(newrig) = %q, want ne", got)
 	}
 }
 

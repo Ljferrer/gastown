@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -1402,94 +1401,13 @@ func (m *Manager) ensureGitignoreEntry(gitignorePath, entry string) error {
 }
 
 // deriveBeadsPrefix generates a beads prefix from a rig name.
-// Examples: "gastown" -> "gt", "my-project" -> "mp", "foo" -> "foo"
+// Examples: "gastown" -> "gt", "my-project" -> "mp", "foo" -> "foo".
+//
+// The algorithm lives in the beads package (beads.DeriveShortPrefix) so the
+// Dolt issue_prefix seed (doltserver.issuePrefixForRigInit) shares a single
+// source of truth and never falls back to the raw directory name (lgt-bto).
 func deriveBeadsPrefix(name string) string {
-	// Strip path separators — callers should validate names, but be defensive
-	name = filepath.Base(name)
-	name = strings.TrimLeft(name, "/\\")
-
-	// Remove common suffixes
-	name = strings.TrimSuffix(name, "-py")
-	name = strings.TrimSuffix(name, "-go")
-
-	// Split on hyphens/underscores
-	parts := strings.FieldsFunc(name, func(r rune) bool {
-		return r == '-' || r == '_'
-	})
-
-	// If single part, try camelCase splitting first (e.g., "myProject" -> "my" + "Project"),
-	// then fall back to compound word detection (e.g., "gastown" -> "gas" + "town").
-	if len(parts) == 1 {
-		if camelParts := splitCamelCase(parts[0]); len(camelParts) >= 2 {
-			parts = camelParts
-		} else {
-			parts = splitCompoundWord(parts[0])
-		}
-	}
-
-	if len(parts) >= 2 {
-		// Take first letter of each part: "gas-town" -> "gt"
-		prefix := ""
-		for _, p := range parts {
-			if len(p) > 0 {
-				prefix += string(p[0])
-			}
-		}
-		return strings.ToLower(prefix)
-	}
-
-	// Single word: use first 2-3 chars
-	if len(name) <= 3 {
-		return strings.ToLower(name)
-	}
-	return strings.ToLower(name[:2])
-}
-
-// splitCompoundWord attempts to split a compound word into its components.
-// Common suffixes like "town", "ville", "port" are detected to split
-// compound names (e.g., "gastown" -> ["gas", "town"]).
-func splitCompoundWord(word string) []string {
-	word = strings.ToLower(word)
-
-	// Common suffixes for compound place names
-	suffixes := []string{"town", "ville", "port", "place", "land", "field", "wood", "ford"}
-
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(word, suffix) && len(word) > len(suffix) {
-			prefix := word[:len(word)-len(suffix)]
-			if len(prefix) > 0 {
-				return []string{prefix, suffix}
-			}
-		}
-	}
-
-	return []string{word}
-}
-
-// splitCamelCase splits a camelCase or PascalCase string into its word parts.
-// Examples: "myProject" -> ["my", "Project"], "gasStation" -> ["gas", "Station"],
-// "HTMLParser" -> ["HTML", "Parser"].
-func splitCamelCase(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var parts []string
-	start := 0
-	runes := []rune(s)
-	for i := 1; i < len(runes); i++ {
-		// Split when transitioning from lower to upper: "myProject" at 'P'
-		if unicode.IsLower(runes[i-1]) && unicode.IsUpper(runes[i]) {
-			parts = append(parts, string(runes[start:i]))
-			start = i
-		}
-		// Split when transitioning from upper run to upper+lower: "HTMLParser" at 'P'
-		if i >= 2 && unicode.IsUpper(runes[i-1]) && unicode.IsUpper(runes[i-2]) && unicode.IsLower(runes[i]) {
-			parts = append(parts, string(runes[start:i-1]))
-			start = i - 1
-		}
-	}
-	parts = append(parts, string(runes[start:]))
-	return parts
+	return beads.DeriveShortPrefix(name)
 }
 
 // detectBeadsPrefixFromConfig reads the issue prefix from a beads config.yaml file.

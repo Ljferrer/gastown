@@ -434,26 +434,8 @@ func detectPrefix(beadsDir string) string {
 	// NOTE: Inside towns, this is typically unreachable because GetRigPrefix
 	// always returns at least "gt" (the default) when a rig isn't found in
 	// rigs.json. This fallback is primarily for standalone rigs outside towns.
-	configPath := filepath.Join(beadsDir, "config.yaml")
-	if data, err := os.ReadFile(configPath); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			for _, key := range []string{"issue-prefix:", "prefix:"} {
-				if strings.HasPrefix(line, key) {
-					parts := strings.SplitN(line, ":", 2)
-					if len(parts) == 2 {
-						candidate := strings.TrimSpace(parts[1])
-						// Strip quotes first, then trailing dash — matches
-						// detectBeadsPrefixFromConfig in rig/manager.go.
-						candidate = stripYAMLQuotes(candidate)
-						candidate = strings.TrimSuffix(candidate, "-")
-						if candidate != "" && prefixRe.MatchString(candidate) {
-							return candidate
-						}
-					}
-				}
-			}
-		}
+	if candidate := PrefixFromConfigYAML(beadsDir); candidate != "" {
+		return candidate
 	}
 
 	// 3. Default

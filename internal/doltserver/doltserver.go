@@ -2774,6 +2774,18 @@ func openRigStoreFromConfig(ctx context.Context, townRoot, beadsDir, rigName str
 	return beadssdk.OpenFromConfig(ctx, beadsDir)
 }
 
+// issuePrefixForRigInit resolves the short issue prefix to seed a rig's beads
+// database with. It checks, in priority order:
+//  1. town routes.jsonl (route.Prefix)
+//  2. mayor/rigs.json (entry.BeadsConfig.Prefix)
+//  3. the rig's own .beads/config.yaml (issue-prefix / prefix)
+//
+// If none is configured it derives a SHORT prefix from the rig name (e.g.
+// "LokustGasTown" -> "lgt"). It never returns the raw directory name: seeding
+// issue_prefix with the directory name is what produced corrupted multi-prefix
+// databases (e.g. "LokustGasTown-wisp-*" alongside "lgt-*") because every wisp,
+// patrol bead, and bd-created issue inherits the database's configured prefix
+// (lgt-bto).
 func issuePrefixForRigInit(townRoot, rigName string) string {
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if routes, err := beads.LoadRoutes(beadsDir); err == nil {
@@ -2799,7 +2811,17 @@ func issuePrefixForRigInit(townRoot, rigName string) string {
 		}
 	}
 
-	return strings.TrimSuffix(rigName, "-")
+	// Honor the rig's own .beads/config.yaml issue-prefix. The mayor configured
+	// this correctly for several rigs, yet wisps still got the directory name —
+	// because this function never consulted config.yaml before falling back.
+	rigBeadsDir := filepath.Join(townRoot, rigName, ".beads")
+	if prefix := beads.PrefixFromConfigYAML(rigBeadsDir); prefix != "" {
+		return prefix
+	}
+
+	// Nothing configured: derive a short prefix from the rig name rather than
+	// using the raw directory name.
+	return beads.DeriveShortPrefix(rigName)
 }
 
 // Migration represents a database migration from old to new location.
